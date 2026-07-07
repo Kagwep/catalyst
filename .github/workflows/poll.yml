@@ -34,6 +34,12 @@ jobs:
       # Required: the DB password, passed to libpq separately so special chars
       # (@ : / # …) need no URL-encoding.
       DATABASE_PASSWORD: ${{ secrets.DATABASE_PASSWORD }}
+      # Required on Actions: the Bluesky public AppView 403s datacenter IPs
+      # (Actions runners included), so the adapter must authenticate. Use an
+      # app password (Settings → Privacy and Security → App Passwords), never
+      # the account password.
+      BLUESKY_HANDLE: ${{ secrets.BLUESKY_HANDLE }}
+      BLUESKY_APP_PASSWORD: ${{ secrets.BLUESKY_APP_PASSWORD }}
       # Optional: only used if you enable the matching flags below.
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       FRED_API_KEY: ${{ secrets.FRED_API_KEY }}

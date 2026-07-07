@@ -839,7 +839,27 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _load_dotenv(path: str = ".env") -> None:
+    """Load KEY=VALUE lines from .env into os.environ (real env vars win)."""
+    import os
+
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip().strip("'\"")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
 def main(argv: list[str] | None = None) -> int:
+    _load_dotenv()
     args = build_parser().parse_args(argv)
 
     if args.cmd == "query":

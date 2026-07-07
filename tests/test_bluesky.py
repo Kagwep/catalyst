@@ -5,6 +5,15 @@ import respx
 from catalyst import bluesky
 
 APPVIEW = bluesky.PUBLIC_APPVIEW
+PDS = bluesky.PDS_URL
+
+
+@pytest.fixture(autouse=True)
+def no_ambient_credentials(monkeypatch):
+    """Keep tests on the public path regardless of the host env; reset session cache."""
+    monkeypatch.delenv("BLUESKY_HANDLE", raising=False)
+    monkeypatch.delenv("BLUESKY_APP_PASSWORD", raising=False)
+    bluesky._auth_client = None
 
 
 def page(uri, handle, likes, cursor):
@@ -68,4 +77,57 @@ def test_raises_helpful_error_on_non_ok():
         return_value=httpx.Response(429, text="rate limited")
     )
     with pytest.raises(RuntimeError, match="429"):
+        bluesky.search_posts("news", max=1)
+
+
+def set_credentials(monkeypatch):
+    monkeypatch.setenv("BLUESKY_HANDLE", "oracle.bsky.social")
+    monkeypatch.setenv("BLUESKY_APP_PASSWORD", "xxxx-xxxx-xxxx-xxxx")
+
+
+@respx.mock
+def test_with_credentials_logs_in_and_searches_via_pds(monkeypatch):
+    set_credentials(monkeypatch)
+    login = respx.post(f"{PDS}/xrpc/com.atproto.server.createSession").mock(
+        return_value=httpx.Response(200, json={"accessJwt": "jwt1", "refreshJwt": "r1"})
+    )
+    search = respx.get(url__startswith=f"{PDS}/xrpc/app.bsky.feed.searchPosts").mock(
+        return_value=httpx.Response(200, json=page("rkey1", "a.com", 3, None))
+    )
+    out = bluesky.search_posts("news", max=1)
+    assert login.call_count == 1
+    assert search.calls[0].request.headers["Authorization"] == "Bearer jwt1"
+    assert out[0].uri == "rkey1"
+
+    # Session is cached: a second search must not log in again.
+    bluesky.search_posts("news", max=1)
+    assert login.call_count == 1
+
+
+@respx.mock
+def test_expired_token_triggers_relogin_and_retry(monkeypatch):
+    set_credentials(monkeypatch)
+    login = respx.post(f"{PDS}/xrpc/com.atproto.server.createSession")
+    login.side_effect = [
+        httpx.Response(200, json={"accessJwt": "jwt1", "refreshJwt": "r1"}),
+        httpx.Response(200, json={"accessJwt": "jwt2", "refreshJwt": "r2"}),
+    ]
+    search = respx.get(url__startswith=f"{PDS}/xrpc/app.bsky.feed.searchPosts")
+    search.side_effect = [
+        httpx.Response(400, json={"error": "ExpiredToken", "message": "Token has expired"}),
+        httpx.Response(200, json=page("p1", "a.com", 1, None)),
+    ]
+    out = bluesky.search_posts("news", max=1)
+    assert login.call_count == 2
+    assert search.calls[1].request.headers["Authorization"] == "Bearer jwt2"
+    assert [p.uri for p in out] == ["p1"]
+
+
+@respx.mock
+def test_bad_credentials_raise_a_clear_login_error(monkeypatch):
+    set_credentials(monkeypatch)
+    respx.post(f"{PDS}/xrpc/com.atproto.server.createSession").mock(
+        return_value=httpx.Response(401, json={"error": "AuthenticationRequired"})
+    )
+    with pytest.raises(RuntimeError, match="login failed"):
         bluesky.search_posts("news", max=1)

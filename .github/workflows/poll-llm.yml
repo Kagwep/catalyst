@@ -30,6 +30,10 @@ jobs:
     env:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       DATABASE_PASSWORD: ${{ secrets.DATABASE_PASSWORD }}
+      # Required on Actions: the public Bluesky AppView 403s datacenter IPs,
+      # so the adapter must authenticate (app password, not account password).
+      BLUESKY_HANDLE: ${{ secrets.BLUESKY_HANDLE }}
+      BLUESKY_APP_PASSWORD: ${{ secrets.BLUESKY_APP_PASSWORD }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
     steps:

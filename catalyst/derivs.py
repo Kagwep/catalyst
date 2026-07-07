@@ -11,9 +11,14 @@ Direction convention for the per-asset bias: **+1 = crowded shorts (bullish, roo
 to squeeze up), −1 = crowded longs (bearish, over-leveraged)**. So in the planner
 it damps a buy into crowded longs and boosts a buy into crowded shorts.
 
-Data is keyless Binance USDⓈ-M Futures (free, no key): the historical funding
-endpoint returns a **dated** series (every 8h), so this layer is backtestable by
-dated-input replay like flows; open interest is fetched as dated context. Each
+Data is keyless perp market data behind a **provider chain**: Binance USDⓈ-M
+Futures first (richer history, USD OI series), Bybit v5 as fallback — both
+free, no key. Binance returns 451 from US datacenter IPs (GitHub Actions
+runners), so hosted cycles land on Bybit automatically; the first provider
+that answers is remembered for the rest of the process, and `DERIVS_PROVIDER`
+(`binance`|`bybit`) forces one. The historical funding endpoint returns a
+**dated** series (every 8h), so this layer is backtestable by dated-input
+replay like flows; open interest is fetched as dated context. Each
 `source="derivs"` post carries its signal in `raw` (read by the bias layer, not
 enriched into a signal), and its text uses the exchange symbol (`BTCUSDT`) — not
 a bare ticker — so it can never leak into the sentiment/signal layer.
@@ -22,6 +27,7 @@ a bare ticker — so it can never leak into the sentiment/signal layer.
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -31,7 +37,14 @@ from .models import Author, Post
 
 FUNDING_URL = "https://fapi.binance.com/fapi/v1/fundingRate"
 OI_HIST_URL = "https://fapi.binance.com/futures/data/openInterestHist"
+BYBIT_FUNDING_URL = "https://api.bybit.com/v5/market/funding/history"
+BYBIT_TICKERS_URL = "https://api.bybit.com/v5/market/tickers"
 _HEADERS = {"Accept": "application/json", "User-Agent": "Catalyst/0.1 (+https://github.com/catalyst)"}
+
+PROVIDERS = ("binance", "bybit")
+_TRADE_URLS = {"binance": "https://www.binance.com/en/futures/{sym}",
+               "bybit": "https://www.bybit.com/trade/usdt/{sym}"}
+_active_provider: str | None = None  # sticky: first provider that answered
 
 # Clean ticker → perp symbol. Extend by adding a line.
 _SYMBOLS = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT", "XRP": "XRPUSDT",
@@ -68,29 +81,91 @@ def _iso_ms(ms) -> str:
 
 # ---- Fetch ------------------------------------------------------------------
 
+def _provider_chain() -> tuple[str, ...]:
+    forced = os.environ.get("DERIVS_PROVIDER", "").lower()
+    if forced:
+        return (forced,)
+    if _active_provider:
+        return (_active_provider, *(p for p in PROVIDERS if p != _active_provider))
+    return PROVIDERS
+
+
+def _with_provider(fn):
+    """Run `fn(provider)` down the chain; stick to the first provider that answers."""
+    global _active_provider
+    errors: list[str] = []
+    for provider in _provider_chain():
+        try:
+            result = fn(provider)
+        except Exception as e:  # noqa: BLE001 — any failure means try the next provider
+            errors.append(f"{provider}: {e}")
+            continue
+        _active_provider = provider
+        return provider, result
+    raise RuntimeError("derivs: all providers failed — " + "; ".join(errors))
+
+
+def _bybit_list(data: dict, what: str) -> list[dict]:
+    if data.get("retCode") != 0:
+        raise RuntimeError(f"bybit {what}: {data.get('retCode')} {data.get('retMsg')}")
+    return (data.get("result") or {}).get("list") or []
+
+
+def _funding_rows(provider: str, sym: str, limit: int) -> list[tuple[int, float]]:
+    """(timestamp_ms, funding_rate) rows, oldest-to-newest order not guaranteed."""
+    if provider == "binance":
+        rows = _get(FUNDING_URL, {"symbol": sym, "limit": limit})
+        return [(int(r["fundingTime"]), float(r.get("fundingRate") or 0.0))
+                for r in rows if r.get("fundingTime") is not None]
+    if provider == "bybit":
+        data = _get(BYBIT_FUNDING_URL, {"category": "linear", "symbol": sym,
+                                        "limit": min(limit, 200)})
+        return [(int(r["fundingRateTimestamp"]), float(r.get("fundingRate") or 0.0))
+                for r in _bybit_list(data, "funding") if r.get("fundingRateTimestamp")]
+    raise RuntimeError(f"unknown provider {provider!r}")
+
+
+def _oi_rows(provider: str, sym: str, period: str, limit: int) -> list[tuple[int, float]]:
+    """(timestamp_ms, oi_usd) rows. Bybit's OI history is coin-denominated, so
+    there we take the single current USD value from tickers — the bias only
+    reads the latest point, and the store accretes a dated series over cycles."""
+    if provider == "binance":
+        rows = _get(OI_HIST_URL, {"symbol": sym, "period": period, "limit": limit})
+        return [(int(r["timestamp"]), float(r.get("sumOpenInterestValue") or 0.0))
+                for r in rows if r.get("timestamp") is not None]
+    if provider == "bybit":
+        data = _get(BYBIT_TICKERS_URL, {"category": "linear", "symbol": sym})
+        items = _bybit_list(data, "tickers")
+        if not items:
+            return []
+        ts = int(data.get("time") or datetime.now(timezone.utc).timestamp() * 1000)
+        return [(ts, float(items[0].get("openInterestValue") or 0.0))]
+    raise RuntimeError(f"unknown provider {provider!r}")
+
+
 def fetch_funding(assets: list[str] | None = None, *, limit: int = 30,
                   now: datetime | None = None) -> list[Post]:
     """Historical perp funding rate (dated, ~8h cadence) per asset as `derivs` posts."""
     assets = assets or ["BTC", "ETH"]
+
+    def pull(provider: str) -> dict[str, list[tuple[int, float]]]:
+        return {asset: _funding_rows(provider, _symbol(asset), limit) for asset in assets}
+
+    provider, per_asset = _with_provider(pull)
     out: list[Post] = []
-    for asset in assets:
+    for asset, rows in per_asset.items():
         sym = _symbol(asset)
-        rows = _get(FUNDING_URL, {"symbol": sym, "limit": limit})
-        for r in rows:
-            rate = float(r.get("fundingRate") or 0.0)
-            ts = r.get("fundingTime")
-            if ts is None:
-                continue
+        for ts, rate in rows:
             iso = _iso_ms(ts)
             out.append(Post(
                 source="derivs",
                 uri=f"derivs:funding:{asset.upper()}:{ts}",
-                url=f"https://www.binance.com/en/futures/{sym}",
+                url=_TRADE_URLS[provider].format(sym=sym),
                 text=f"[DERIVS] {sym} perp funding {rate * 100:+.4f}% (8h)",
                 created_at=iso, indexed_at=iso,
                 author=Author(handle="derivs", display_name=f"{sym} funding"),
                 raw={"kind": "funding", "asset": asset.upper(), "symbol": sym,
-                     "funding_rate": rate},
+                     "funding_rate": rate, "provider": provider},
             ))
     return out
 
@@ -99,24 +174,25 @@ def fetch_open_interest(assets: list[str] | None = None, *, period: str = "1d",
                         limit: int = 30, now: datetime | None = None) -> list[Post]:
     """Historical open interest (dated) per asset as `derivs` posts (context)."""
     assets = assets or ["BTC", "ETH"]
+
+    def pull(provider: str) -> dict[str, list[tuple[int, float]]]:
+        return {asset: _oi_rows(provider, _symbol(asset), period, limit) for asset in assets}
+
+    provider, per_asset = _with_provider(pull)
     out: list[Post] = []
-    for asset in assets:
+    for asset, rows in per_asset.items():
         sym = _symbol(asset)
-        rows = _get(OI_HIST_URL, {"symbol": sym, "period": period, "limit": limit})
-        for r in rows:
-            oi_usd = float(r.get("sumOpenInterestValue") or 0.0)
-            ts = r.get("timestamp")
-            if ts is None:
-                continue
+        for ts, oi_usd in rows:
             iso = _iso_ms(ts)
             out.append(Post(
                 source="derivs",
                 uri=f"derivs:oi:{asset.upper()}:{ts}",
-                url=f"https://www.binance.com/en/futures/{sym}",
+                url=_TRADE_URLS[provider].format(sym=sym),
                 text=f"[DERIVS] {sym} open interest ${oi_usd / 1e6:,.0f}M",
                 created_at=iso, indexed_at=iso,
                 author=Author(handle="derivs", display_name=f"{sym} OI"),
-                raw={"kind": "oi", "asset": asset.upper(), "symbol": sym, "oi_usd": oi_usd},
+                raw={"kind": "oi", "asset": asset.upper(), "symbol": sym,
+                     "oi_usd": oi_usd, "provider": provider},
             ))
     return out
 

@@ -72,10 +72,32 @@ repository secret**:
 |---|---|---|
 | `DATABASE_URL` | **yes** | Session-pooler URI from step 1, **without** the password |
 | `DATABASE_PASSWORD` | **yes** | the raw DB password (no URL-encoding needed) |
+| `BLUESKY_HANDLE` | **yes** | your Bluesky handle, e.g. `you.bsky.social` — see below |
+| `BLUESKY_APP_PASSWORD` | **yes** | a Bluesky **app password**, never the account password |
 | `ANTHROPIC_API_KEY` | no | only if you enable `--llm` enrichment |
 | `FRED_API_KEY` | no | only if you enable `--fred` macro series |
 
 Secrets are encrypted and are **not** exposed by a public repo.
+
+**Why Bluesky needs auth here but not locally:** the public Bluesky AppView
+(`public.api.bsky.app`) serves an HTML 403 to datacenter/cloud IPs, and GitHub
+Actions runners are datacenter IPs. With the two `BLUESKY_*` secrets set, the
+adapter logs in to the PDS and makes authenticated XRPC calls, which are not
+IP-blocked. Create the app password at Bluesky **Settings → Privacy and
+Security → App Passwords**.
+
+**Derivs on Actions runners:** `fapi.binance.com` returns 451 from US
+datacenter IPs (where the runners sit), so the derivs layer runs a provider
+chain — Binance first, **Bybit v5 fallback** (also keyless). Hosted cycles land
+on Bybit automatically; nothing to configure. Set `DERIVS_PROVIDER=bybit` (or
+`binance`) to force one. If a hosted cycle still shows derivs as
+`source_silent`, check the run log for the combined provider error.
+
+**Known loss on Actions runners (auth can't fix it):** farside.co.uk (ETF
+flows) is behind Cloudflare bot protection that 403s datacenter IPs. The
+poller degrades gracefully — the source skips and the ops layer flags it
+`source_silent` — but hosted cycles run without the flows layer until that
+source is replaced or the poller moves to a box with a clean IP.
 
 ## 4. Run it
 

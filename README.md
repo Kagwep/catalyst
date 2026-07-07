@@ -116,7 +116,7 @@ so adding a data source never disturbs the layers above it.
 | **Staking queue** | ETH validator entry queue (beacon node, direct, no key) → per-asset supply sink | ✅ |
 | **Market / momentum** | Price technicals RSI/MACD (DefiLlama prices) + Fear & Greed (alternative.me, no key) → per-asset momentum bias | ✅ |
 | **On-chain actions** | Proxy upgrades, timelocked governance, treasury moves — from Ethereum event logs (public JSON-RPC, no key) → per-asset upgrade/timelock/treasury catalysts | ✅ |
-| **Derivatives** | Perp funding + open interest (Binance, no key) → per-asset positioning bias (crowded longs/shorts fade the aligned trade) | ✅ |
+| **Derivatives** | Perp funding + open interest (Binance → Bybit fallback, no key) → per-asset positioning bias (crowded longs/shorts fade the aligned trade) | ✅ |
 
 A **`protocols.json` registry** ties each protocol to its GitHub repos, Snapshot
 space, DeFiLlama slug, and **token symbol** — so a release or governance proposal
@@ -240,6 +240,11 @@ catalyst search "climate policy" --max 50 --sort latest
 
 # An account's posts + reposts (handle or DID)
 catalyst author nytimes.com --max 50
+
+# Bluesky works keyless from residential IPs, but the public AppView 403s most
+# datacenter/cloud IPs. On a hosted box set BLUESKY_HANDLE + BLUESKY_APP_PASSWORD
+# (Settings → Privacy and Security → App Passwords) and the adapter switches to
+# authenticated XRPC via the PDS, which is not IP-blocked.
 
 # An RSS or Atom feed (same normalized output as Bluesky)
 catalyst rss https://feeds.bbci.co.uk/news/rss.xml --max 25
@@ -413,9 +418,12 @@ history, this layer is **backtestable today** (no snapshotting needed).
 
 ## Derivatives layer (funding & open interest)
 
-Keyless Binance perp **funding + open interest** → a per-asset **positioning
+Keyless perp **funding + open interest** → a per-asset **positioning
 bias**: crowded longs fade bullishness, crowded shorts fade bearishness (the
-aligned trade is the crowded one, so it's the one to be wary of).
+aligned trade is the crowded one, so it's the one to be wary of). Data comes
+from a provider chain — Binance first, Bybit v5 fallback (Binance 451s US
+datacenter IPs, e.g. GitHub Actions runners); force one with
+`DERIVS_PROVIDER=binance|bybit`.
 
 ```bash
 catalyst derivs --save --db oracle.db           # funding + OI per asset, persist

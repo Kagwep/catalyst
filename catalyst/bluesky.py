@@ -1,12 +1,17 @@
-"""Bluesky (AT Protocol) adapter — public read endpoints, no auth required.
+"""Bluesky (AT Protocol) adapter — public read endpoints, optional auth.
 
-All requests hit the public AppView. These endpoints need no API key, token, or
-auth. Auth is only needed for writing, your personal timeline, or the firehose
-— none of which this module touches.
+By default requests hit the public AppView keyless. That works from residential
+IPs, but the public AppView blocks most datacenter/cloud IPs with an HTML 403,
+so on a hosted box set ``BLUESKY_HANDLE`` + ``BLUESKY_APP_PASSWORD`` (an app
+password from Settings → Privacy and Security → App Passwords): the adapter
+then creates a session on the PDS and makes authenticated XRPC calls, which are
+not IP-blocked. Sessions are re-created transparently when the access token
+expires (~2h; well inside createSession rate limits for a poller).
 """
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import httpx
@@ -14,20 +19,56 @@ import httpx
 from .models import Author, Metrics, Post
 
 PUBLIC_APPVIEW = "https://public.api.bsky.app"
+PDS_URL = os.environ.get("BLUESKY_PDS_URL", "https://bsky.social")
 _USER_AGENT = "Catalyst/0.1 (+https://github.com/catalyst)"
+_HEADERS = {"Accept": "application/json", "User-Agent": _USER_AGENT}
 
 # Reused across calls. Some CDN-fronted endpoints 403 requests with no UA.
-_client = httpx.Client(
-    base_url=PUBLIC_APPVIEW,
-    headers={"Accept": "application/json", "User-Agent": _USER_AGENT},
-    timeout=15.0,
-)
+_client = httpx.Client(base_url=PUBLIC_APPVIEW, headers=_HEADERS, timeout=15.0)
+
+_auth_client: httpx.Client | None = None
+
+
+def _credentials() -> tuple[str, str] | None:
+    handle = os.environ.get("BLUESKY_HANDLE")
+    password = os.environ.get("BLUESKY_APP_PASSWORD")
+    return (handle, password) if handle and password else None
+
+
+def _login() -> httpx.Client:
+    """Create (or re-create) an authenticated session on the PDS."""
+    global _auth_client
+    handle, password = _credentials()  # only called when credentials exist
+    resp = httpx.post(
+        f"{PDS_URL}/xrpc/com.atproto.server.createSession",
+        json={"identifier": handle, "password": password},
+        headers=_HEADERS,
+        timeout=15.0,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"Bluesky login failed for {handle}: {resp.status_code} {resp.reason_phrase}"
+            f" — {resp.text[:300]}"
+        )
+    token = resp.json()["accessJwt"]
+    if _auth_client is not None:
+        _auth_client.close()
+    _auth_client = httpx.Client(
+        base_url=PDS_URL,
+        headers={**_HEADERS, "Authorization": f"Bearer {token}"},
+        timeout=15.0,
+    )
+    return _auth_client
 
 
 def xrpc_get(method: str, params: dict[str, Any]) -> dict[str, Any]:
-    """Low-level XRPC GET against the public AppView."""
+    """Low-level XRPC GET — authenticated PDS when credentials are set, else public AppView."""
     clean = {k: v for k, v in params.items() if v is not None}
-    resp = _client.get(f"/xrpc/{method}", params=clean)
+    authed = _credentials() is not None
+    client = (_auth_client or _login()) if authed else _client
+    resp = client.get(f"/xrpc/{method}", params=clean)
+    if authed and resp.status_code in (400, 401) and "ExpiredToken" in resp.text:
+        resp = _login().get(f"/xrpc/{method}", params=clean)
     if resp.status_code != 200:
         body = resp.text[:500]
         raise RuntimeError(
