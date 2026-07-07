@@ -1,0 +1,51 @@
+{
+  "_comment": "Signal weighting knobs. Pass with `--weights weights.json` to signals/plan/poll. Tune these against `enrich --llm` output. Values shown are the built-in defaults.",
+
+  "source_weights": {
+    "defillama": 1.4,
+    "snapshot": 1.1,
+    "github": 1.2,
+    "bluesky": 1.0,
+    "rss": 0.9
+  },
+
+  "primary_boost": 1.6,
+  "strength_saturation": 3.0,
+
+  "_flow_comment": "Per-asset USD tanh-scale for the ETF-flow bias (bigger = less sensitive).",
+  "flow_scale": {
+    "BTC": 1000000000,
+    "ETH": 250000000
+  },
+
+  "_supply_comment": "On-chain supply bias: unlock_scale = fraction-of-float that saturates the bearish bias; stake_scale = net ETH entry that saturates the bullish bias; exit_weight down-weights the noisy exit queue.",
+  "horizon_days": 30,
+  "unlock_scale": 0.05,
+  "stake_scale": 2000000,
+  "exit_weight": 0.3,
+
+  "_market_comment": "Market/momentum layer: fng_weight = how much market-wide Fear&Greed nudges per-asset momentum; macd_scale = MACD-histogram sensitivity.",
+  "fng_weight": 0.3,
+  "macd_scale": 20,
+
+  "_derivs_comment": "Derivatives positioning layer: funding_scale = perp funding rate that saturates the crowded-positioning bias (bigger = less sensitive); derivs_halflife = hours for the recency decay.",
+  "funding_scale": 0.0005,
+  "derivs_halflife": 24,
+
+  "catalyst_weights": {
+    "hack": 2.0,
+    "etf": 1.8,
+    "liquidation": 1.6,
+    "listing": 1.5,
+    "unlock": 1.5,
+    "regulation": 1.4,
+    "mainnet": 1.3,
+    "tvl": 1.3,
+    "release": 1.3,
+    "upgrade": 1.3,
+    "treasury": 1.3,
+    "timelock": 1.2,
+    "governance": 1.3,
+    "partnership": 1.2
+  }
+}

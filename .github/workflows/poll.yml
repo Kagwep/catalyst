@@ -1,0 +1,55 @@
+name: poll
+
+# Hosted ingestion: run one catalyst poll cycle on a schedule, writing into
+# Supabase Postgres (via the DATABASE_URL secret). This replaces the local
+# `catalyst poll --interval 15m` loop — each run is one `--once` cycle and the
+# cycle number continues across runs (stored in Postgres), so the sequence is
+# stable and monotonic.
+#
+# Public repo => unlimited Actions minutes, so the cadence below is free.
+
+on:
+  schedule:
+    # Every 15 minutes (UTC). GitHub may fire scheduled runs late under load;
+    # the pipeline tolerates jitter. Tighten/loosen the cron as you like.
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}   # manual "Run workflow" button for on-demand cycles
+
+# Never let two cycles overlap: a slow run is skipped rather than doubled up.
+concurrency:
+  group: poll
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Required: Supabase Postgres DSN (WITHOUT the password). Presence of this
+      # switches the store backend from local SQLite to Postgres.
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      # Required: the DB password, passed to libpq separately so special chars
+      # (@ : / # …) need no URL-encoding.
+      DATABASE_PASSWORD: ${{ secrets.DATABASE_PASSWORD }}
+      # Optional: only used if you enable the matching flags below.
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies (with Postgres backend)
+        # Add ,llm here (and pass --llm below) to enable Anthropic enrichment.
+        run: uv sync --extra pg
+
+      - name: Run one poll cycle
+        # Mirrors the local poller's defaults (rule-based enrich + planner).
+        # Add --llm for Anthropic scoring, --fred for FRED macro series.
+        run: uv run catalyst poll --once

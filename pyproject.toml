@@ -1,0 +1,42 @@
+[project]
+name = "catalyst"
+version = "0.1.0"
+description = "Pull and normalize posts from Bluesky and RSS/Atom feeds for news aggregation."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+    "httpx>=0.27",
+    "feedparser>=6.0",
+    "pydantic>=2.6",
+    "croo-sdk>=0.2.1",
+]
+
+[project.optional-dependencies]
+# Data/ML extras — only needed for DataFrame / Parquet access.
+ml = [
+    "pandas>=2.2",
+    "pyarrow>=15.0",
+]
+llm = [
+    "anthropic>=0.69",
+]
+# Postgres backend — only needed for hosted runs (Supabase). Selected at
+# runtime by the DATABASE_URL env var; local dev stays on stdlib sqlite3.
+pg = [
+    "psycopg[binary]>=3.1",
+]
+dev = [
+    "pytest>=8.0",
+    "respx>=0.21",
+]
+
+[project.scripts]
+catalyst = "catalyst.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["catalyst"]

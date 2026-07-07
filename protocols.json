@@ -1,0 +1,38 @@
+{
+  "_comment": "Per-protocol registry. github = owner/repo (release feeds), snapshot = governance space, symbol = token ticker for asset attribution. Edit freely.",
+  "protocols": [
+    {
+      "name": "Uniswap",
+      "symbol": "UNI",
+      "github": ["Uniswap/v4-core"],
+      "snapshot": "uniswapgovernance.eth",
+      "defillama": "uniswap"
+    },
+    {
+      "name": "Aave",
+      "symbol": "AAVE",
+      "github": ["aave/aave-v3-core"],
+      "snapshot": "aave.eth",
+      "defillama": "aave"
+    },
+    {
+      "name": "Lido",
+      "symbol": "LDO",
+      "github": ["lidofinance/core"],
+      "snapshot": "lido-snapshot.eth",
+      "defillama": "lido"
+    },
+    {
+      "name": "Arbitrum",
+      "symbol": "ARB",
+      "github": ["OffchainLabs/nitro"],
+      "snapshot": "arbitrumfoundation.eth",
+      "defillama": "arbitrum"
+    },
+    {
+      "name": "Ethereum",
+      "symbol": "ETH",
+      "github": ["ethereum/go-ethereum"]
+    }
+  ]
+}

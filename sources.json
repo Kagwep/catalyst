@@ -1,0 +1,48 @@
+{
+  "accounts_file": "news-crypto-blue-sky.txt",
+  "accounts_max": 25,
+
+  "keywords": [
+    { "q": "mainnet launch", "sort": "latest", "max": 25 },
+    { "q": "protocol upgrade", "sort": "latest", "max": 25 },
+    { "q": "token listing", "sort": "latest", "max": 25 },
+    { "q": "ETF approval", "sort": "latest", "max": 25 }
+  ],
+
+  "feeds": [
+    { "url": "https://cointelegraph.com/rss", "max": 25 },
+    { "url": "https://feeds.bbci.co.uk/news/rss.xml", "max": 15 }
+  ],
+
+  "defillama": {
+    "hacks": { "since_days": 30, "min_amount": 1000000, "max": 50 },
+    "tvl": { "min_tvl": 50000000, "min_change_pct": 15, "window": "1d", "max": 25 },
+    "listings": { "days": 7, "min_tvl": 1000000, "max": 25 }
+  },
+
+  "protocols_file": "protocols.json",
+  "protocols": { "releases_max": 5, "governance_state": "active", "governance_first": 20 },
+
+  "macro": { "central_banks": true, "max": 10, "fred": { "api_key": null } },
+
+  "flows": { "etf": true, "assets": ["BTC", "ETH"], "max_days": 14 },
+
+  "onchain": { "unlocks": { "horizon_days": 30 }, "staking": true },
+
+  "onchain_actions": { "watch": [], "min_value_usd": 1000000, "lookback_blocks": 300, "chunk_blocks": 100 },
+
+  "derivs": { "assets": ["BTC", "ETH", "SOL"] },
+
+  "market": { "fear_greed": true, "limit": 30 },
+
+  "dedupe": { "enabled": true, "jaccard": 0.72 },
+
+  "alerts": {
+    "min_confidence": 0.5,
+    "actions": ["buy", "sell"],
+    "cooldown_minutes": 60,
+    "sinks": [{ "type": "stderr" }]
+  },
+
+  "monitoring": { "silence_cycles": 3, "max_error_streak": 3, "llm_call_ceiling": null }
+}

@@ -1,0 +1,53 @@
+name: poll (LLM)
+
+# Same ingestion cycle as poll.yml, but with Anthropic LLM enrichment (--llm).
+# Manual-only by default (Actions -> "poll (LLM)" -> Run workflow) so it does NOT
+# double-poll alongside the scheduled rule-based poll.yml.
+#
+# To make LLM enrichment the *scheduled* poller instead:
+#   1. uncomment the `schedule:` block below, and
+#   2. disable poll.yml (rename it, delete it, or comment out its schedule)
+# so only one workflow writes on a cron.
+#
+# Requires the ANTHROPIC_API_KEY repo secret (in addition to DATABASE_URL).
+
+on:
+  workflow_dispatch: {}
+  # schedule:
+  #   - cron: "*/15 * * * *"
+
+concurrency:
+  group: poll          # shares poll.yml's group so the two never overlap
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  poll-llm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15   # LLM scoring is slower than the rule-based path
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      DATABASE_PASSWORD: ${{ secrets.DATABASE_PASSWORD }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check required secrets
+        run: |
+          test -n "$DATABASE_URL" || { echo "::error::DATABASE_URL secret is not set"; exit 1; }
+          test -n "$DATABASE_PASSWORD" || { echo "::error::DATABASE_PASSWORD secret is not set"; exit 1; }
+          test -n "$ANTHROPIC_API_KEY" || { echo "::error::ANTHROPIC_API_KEY secret is not set (required for --llm)"; exit 1; }
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies (Postgres backend + LLM)
+        run: uv sync --extra pg --extra llm
+
+      - name: Run one poll cycle with LLM enrichment
+        run: uv run catalyst poll --once --llm
