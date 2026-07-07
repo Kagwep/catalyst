@@ -40,6 +40,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check required secrets
+        run: |
+          test -n "$DATABASE_URL" || { echo "::error::DATABASE_URL secret is not set"; exit 1; }
+          test -n "$DATABASE_PASSWORD" || { echo "::error::DATABASE_PASSWORD secret is not set"; exit 1; }
+
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
