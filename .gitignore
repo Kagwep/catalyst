@@ -12,7 +12,6 @@ supabase/.branches/
 __pycache__/
 *.egg-info/
 .pytest_cache/
-uv.lock
 
 # Flows HTTP cache (last-good ETF-flow pages)
 .cache/
