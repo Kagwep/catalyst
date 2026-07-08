@@ -124,6 +124,99 @@ def default_pipeline(
     return flat
 
 
+_SEV_RANK = {"high": 3, "medium": 2, "low": 1, "none": 0}
+
+
+def _age_str(dt, now) -> str:
+    mins = max(0.0, (now - dt).total_seconds() / 60.0)
+    if mins < 60:
+        return f"{int(mins)}m ago"
+    if mins < 1440:
+        return f"{int(mins // 60)}h ago"
+    return f"{int(mins // 1440)}d ago"
+
+
+def events_pipeline(db_path: str, requirements: dict) -> dict:
+    """The `catalyst.events` service: a breadth feed of market-moving catalyst
+    events, read straight from the enriched store (the `event`/`severity` written
+    at enrich time). No LLM at serve time.
+
+    Buyer filters (all optional strings): `assets`, `catalysts`, `min_severity`
+    (default medium), `direction`, `window` (default 24h), `limit` (default 20)."""
+    from datetime import datetime, timezone, timedelta
+
+    from .payload import (
+        DEFAULT_WINDOW_HOURS, build_events_delivery, requirements_window_hours,
+    )
+    from .signals import _assets, _parse_dt
+    from .store import fetch_events, open_store
+
+    req = requirements or {}
+
+    def _csv(v):
+        if not v:
+            return None
+        vals = [s.strip().strip("\"'").strip() for s in str(v).split(",")]
+        return {s for s in vals if s} or None
+
+    window_hours = requirements_window_hours(req) or DEFAULT_WINDOW_HOURS
+    want_assets = {a.upper() for a in (_csv(req.get("assets")) or set())} or None
+    want_cats = {c.lower() for c in (_csv(req.get("catalysts")) or set())} or None
+    want_dir = (str(req.get("direction")).strip().lower() or None) if req.get("direction") else None
+    min_sev = str(req.get("min_severity") or "medium").strip().lower()
+    min_rank = _SEV_RANK.get(min_sev, 2)
+    try:
+        limit = max(1, min(50, int(str(req.get("limit") or 20).strip())))
+    except (TypeError, ValueError):
+        limit = 20
+
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=window_hours)
+
+    conn = open_store(db_path)
+    try:
+        rows = fetch_events(conn)        # news-source posts with a concrete event
+    finally:
+        conn.close()
+
+    picked: list[tuple] = []
+    for r in rows:
+        ev = r.get("event")
+        if not ev:                        # only posts with a concrete event
+            continue
+        sev = (r.get("severity") or "none").lower()
+        if _SEV_RANK.get(sev, 0) < min_rank:
+            continue
+        dt = _parse_dt(r.get("indexed_at"))
+        if dt is None or dt < cutoff:
+            continue
+        assets = _assets(r)
+        asset = next((a for a in assets if not want_assets or a.upper() in want_assets),
+                     None if want_assets else (assets[0] if assets else "MARKET"))
+        if asset is None:                 # buyer asked for assets none of which match
+            continue
+        cat = (r.get("catalyst") or "").lower()
+        if want_cats and cat not in want_cats:
+            continue
+        s = r.get("sentiment_score") or 0.0
+        direction = "bullish" if s > 0.1 else "bearish" if s < -0.1 else "neutral"
+        if want_dir and direction != want_dir:
+            continue
+        picked.append((_SEV_RANK.get(sev, 0), dt, {
+            "asset": asset.upper(), "catalyst": cat or None, "event": ev,
+            "direction": direction, "severity": sev, "sentiment": round(float(s), 3),
+            "source": r.get("source"), "url": r.get("url"),
+            "at": dt.isoformat(), "age": _age_str(dt, now),
+        }))
+
+    # Most market-moving first, then most recent.
+    picked.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    events = [e for _, _, e in picked[:limit]]
+    return build_events_delivery(events, meta={
+        "window_hours": window_hours, "requirements": req,
+    })
+
+
 def no_op_pipeline(requirements: dict) -> dict:
     """A hardcoded, canonical-shaped deliverable — the SDK-smoke probe.
 
@@ -220,7 +313,7 @@ class CrooProvider:
     def __init__(
         self, client, *, db_path: str = "catalyst.db", covered_assets=None,
         pipeline=None, health=None, weights: dict | None = None, deliver_factory=None,
-        present=None,
+        present=None, services=None,
     ):
         self.client = client
         self.db_path = db_path
@@ -228,24 +321,35 @@ class CrooProvider:
         self._pipeline = pipeline or (
             lambda req: default_pipeline(db_path, req, weights=weights, present=present)
         )
+        # Extra services keyed by their Croo service_id (e.g. the events feed). An
+        # order whose service_id isn't here falls through to the default signal
+        # pipeline, so a single-service provider behaves exactly as before.
+        self._services = dict(services or {})
         self._health = health or (lambda: default_health(db_path))
         self._deliver_factory = deliver_factory or _default_deliver_factory
         self._delivered: set[str] = set()      # order_ids we've delivered (idempotency)
         self._stream = None
 
+    def _pipeline_for(self, service_id):
+        return self._services.get(service_id, self._pipeline)
+
     # ---- gate ----
 
-    def gate(self, requirements) -> tuple[bool, str]:
-        """Decide whether to accept an order: parseable, covered, and healthy."""
+    def gate(self, requirements, *, check_coverage: bool = True) -> tuple[bool, str]:
+        """Decide whether to accept an order: parseable, covered, and healthy.
+
+        `check_coverage=False` skips the asset-coverage filter — used for the
+        events feed, which serves the whole market rather than a fixed universe."""
         if requirements is None:
             return False, "unparseable requirements"
-        want = requirements.get("assets") or requirements.get("asset")
-        if isinstance(want, str):   # Dashboard v2 sends assets as a comma-separated string
-            want = [s.strip().strip("\"'").strip() for s in want.split(",") if s.strip().strip("\"'").strip()]
-        if self.covered_assets is not None and want:
-            wanted = {a.upper() for a in want}
-            if not (wanted & self.covered_assets):
-                return False, f"unsupported assets: {sorted(wanted)}"
+        if check_coverage and self.covered_assets is not None:
+            want = requirements.get("assets") or requirements.get("asset")
+            if isinstance(want, str):   # Dashboard v2 sends assets as a comma-separated string
+                want = [s.strip().strip("\"'").strip() for s in want.split(",") if s.strip().strip("\"'").strip()]
+            if want:
+                wanted = {a.upper() for a in want}
+                if not (wanted & self.covered_assets):
+                    return False, f"unsupported assets: {sorted(wanted)}"
         ok, reason = self._health()
         if not ok:
             return False, f"pipeline unhealthy: {reason}"
@@ -256,7 +360,10 @@ class CrooProvider:
     async def handle_negotiation(self, negotiation_id: str) -> tuple[str, str]:
         neg = await self.client.get_negotiation(negotiation_id)
         req = parse_requirements(getattr(neg, "requirements", ""))
-        ok, reason = self.gate(req)
+        # Coverage only constrains the signal service; extra services (events)
+        # serve the whole market, so skip the asset-coverage check for them.
+        is_extra = getattr(neg, "service_id", None) in self._services
+        ok, reason = self.gate(req, check_coverage=not is_extra)
         if not ok:
             await self.client.reject_negotiation(negotiation_id, reason)
             logger.info("rejected negotiation %s: %s", negotiation_id, reason)
@@ -276,8 +383,10 @@ class CrooProvider:
 
         neg = await self.client.get_negotiation(order.negotiation_id)
         req = parse_requirements(getattr(neg, "requirements", "")) or {}
+        # Route to the pipeline for this order's service (events vs signals).
+        pipeline = self._pipeline_for(getattr(order, "service_id", None))
         # Sync pipeline off the event loop so the WS heartbeat keeps ticking.
-        payload = await asyncio.to_thread(self._pipeline, req)
+        payload = await asyncio.to_thread(pipeline, req)
         await self.client.deliver_order(order_id, self._deliver_factory(payload))
         self._delivered.add(order_id)
         logger.info("delivered order %s (%d actions)", order_id, payload.get("count", 0))

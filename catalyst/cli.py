@@ -1252,7 +1252,7 @@ def main(argv: list[str] | None = None) -> int:
             level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         )
 
-        from .croo_agent import CrooProvider, build_client_from_env, make_no_op_provider
+        from .croo_agent import CrooProvider, build_client_from_env, events_pipeline, make_no_op_provider
 
         covered = [a.strip().upper() for a in args.assets.split(",")] if args.assets else None
         client = build_client_from_env()
@@ -1270,8 +1270,15 @@ def main(argv: list[str] | None = None) -> int:
                 present = make_anthropic_presenter(model=args.present_model)
                 print(f"  narration ON ({args.present_model}) — grounded summary/notes added",
                       file=sys.stderr)
+            # Second service: the events feed, keyed by its Croo service_id.
+            services = {}
+            events_sid = os.environ.get("CROO_EVENTS_SERVICE_ID")
+            if events_sid:
+                services[events_sid] = lambda req: events_pipeline(args.db, req)
+                print(f"  events service ON (service_id={events_sid[:8]}…) — catalyst.events feed",
+                      file=sys.stderr)
             provider = CrooProvider(client, db_path=args.db, covered_assets=covered,
-                                    present=present)
+                                    present=present, services=services)
             print("Croo provider starting — Ctrl-C to stop (proposals only, not executed)", file=sys.stderr)
         try:
             asyncio.run(provider.run())

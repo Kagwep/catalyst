@@ -210,6 +210,49 @@ def build_event_payload(
     }
 
 
+# --- Flattened catalyst.events delivery (the "events" Croo service) ----------
+# The Dashboard can't register arrays-of-objects, so the feed ships as an
+# array-of-strings (one line per event) plus one structured `lead` object. This
+# is the events twin of `flatten_signals`.
+_EVENT_SENTINEL = "No notable catalyst events in the current window."
+_LEAD_FIELDS = ("asset", "catalyst", "event", "direction", "severity",
+                "sentiment", "source", "url", "at")
+
+
+def event_line(e: dict) -> str:
+    """One pipe-delimited feed line: ASSET | catalyst | what | direction | sev | age."""
+    return " | ".join(str(e.get(k, "")) for k in
+                      ("asset", "catalyst", "event", "direction", "severity", "age"))
+
+
+def build_events_delivery(events, *, meta: dict | None = None, generated_at: str | None = None) -> dict:
+    """Assemble the flat `catalyst.events` deliverable from pre-formatted event
+    dicts (each carrying the _LEAD_FIELDS plus `age`).
+
+    `events` is expected already filtered, ranked (most market-moving first), and
+    capped by the pipeline. Empty → a well-formed feed with a single sentinel line
+    (never an empty array, which the backend would reject as missing)."""
+    events = list(events)
+    out = {
+        "schema": SCHEMA_EVENTS,
+        "version": SCHEMA_VERSION,
+        "generated_at": generated_at or datetime.now(timezone.utc).isoformat(),
+        "disclaimer": DISCLAIMER,
+        "count": len(events),
+        "events": [event_line(e) for e in events] or [_EVENT_SENTINEL],
+    }
+    if events:
+        out["lead"] = {k: events[0].get(k) for k in _LEAD_FIELDS}
+    assets = sorted({e["asset"] for e in events if e.get("asset")})
+    catalysts = sorted({e["catalyst"] for e in events if e.get("catalyst")})
+    if assets:
+        out["assets"] = assets
+    if catalysts:
+        out["catalysts"] = catalysts
+    out.update(meta or {})    # window_hours / requirements → top level
+    return out
+
+
 def select_actions(
     actions,
     *,

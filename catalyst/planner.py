@@ -220,15 +220,22 @@ def plan(
         layers: dict = {}
         layer_notes: list[str] = []
         net_align = 0.0
-        if act in ("buy", "sell"):
-            dir_sign = 1 if act == "buy" else -1
-            for name, label, bias, w in modifiers:
+        directional = act in ("buy", "sell")
+        dir_sign = 1 if act == "buy" else -1     # only meaningful when directional
+        for name, label, bias, w in modifiers:
+            if directional:
+                # Align each layer against the trade and fold it into confidence.
                 align = dir_sign * (1 if bias > 0 else -1)
                 confidence = max(0.0, min(1.0, confidence * (1 + w * align * abs(bias))))
                 net_align += w * align * abs(bias)
-                layers[name] = {"label": label, "bias": round(bias, 3),
-                                "effect": "boost" if align > 0 else "damp", "weight": w}
-                layer_notes.append(f"{name} {label} ({bias:+.2f})")
+                effect = "boost" if align > 0 else "damp"
+            else:
+                # A watch has no trade direction to align against — surface each
+                # layer's own tilt as context (real info, no confidence effect).
+                effect = "bullish" if bias > 0 else "bearish"
+            layers[name] = {"label": label, "bias": round(bias, 3),
+                            "effect": effect, "weight": w}
+            layer_notes.append(f"{name} {label} ({bias:+.2f})")
 
         # Conflict resolution: if the layers on balance push against the trade,
         # it's not a clean setup — surface it as a watch, not a weak buy/sell.

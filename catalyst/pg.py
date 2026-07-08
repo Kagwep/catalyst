@@ -62,8 +62,14 @@ CREATE TABLE IF NOT EXISTS posts (
     assets           TEXT,
     catalyst         TEXT,
     sentiment_model  TEXT,
-    enriched_at      TEXT
+    enriched_at      TEXT,
+    event            TEXT,
+    severity         TEXT
 );
+-- Additive migration for a pre-existing posts table (the CREATE above is a
+-- no-op once it exists, and Postgres has no separate _migrate step)
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS event    TEXT;
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS severity TEXT;
 CREATE INDEX IF NOT EXISTS idx_posts_indexed_at ON posts(indexed_at);
 CREATE INDEX IF NOT EXISTS idx_posts_source     ON posts(source);
 

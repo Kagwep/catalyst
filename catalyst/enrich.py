@@ -27,6 +27,8 @@ class Enrichment:
     assets: list[str] = field(default_factory=list)  # e.g. ["BTC", "ETH"]
     catalyst: str | None = None     # listing | hack | etf | mainnet | regulation | …
     model: str = "lexicon"          # which scorer produced this row
+    event: str | None = None        # one-line "what happened" (LLM only; None for lexicon)
+    severity: str | None = None     # how market-moving: "high" | "medium" | "low" | "none"
 
 
 # ---- Lexicon ----------------------------------------------------------------
@@ -195,7 +197,10 @@ _SYSTEM = (
     "neutral, positive. assets is a list of UPPERCASE tickers the post is about "
     "(e.g. BTC, ETH, SOL); empty if none. catalyst is the event type if any, one "
     "of: listing, hack, etf, mainnet, regulation, partnership, liquidation, macro "
-    "— or null."
+    "— or null. event is a concise (<=12 word) factual statement of WHAT HAPPENED "
+    "that could move the market, drawn only from the post — or null if the post "
+    "reports no concrete event. severity is how market-moving the event is, one of "
+    "high, medium, low, none (none for chatter/opinion with no real event)."
 )
 
 
@@ -218,6 +223,8 @@ def make_anthropic_scorer(model: str = "claude-opus-4-8", client=None) -> Callab
         sentiment_score: float
         assets: list[str]
         catalyst: str | None
+        event: str | None
+        severity: str
 
     def score(text: str) -> Enrichment:
         # Omit `thinking` — this is a fast structured classification, not a
@@ -230,11 +237,14 @@ def make_anthropic_scorer(model: str = "claude-opus-4-8", client=None) -> Callab
             output_format=_Out,
         )
         o = resp.parsed_output
+        sev = (o.severity or "none").strip().lower()
         return Enrichment(
             sentiment_score=max(-1.0, min(1.0, float(o.sentiment_score))),
             sentiment_label=o.sentiment_label,
             assets=[a.upper() for a in o.assets],
             catalyst=o.catalyst,
+            event=(o.event.strip() if o.event and o.event.strip() else None),
+            severity=sev if sev in ("high", "medium", "low", "none") else "none",
             model=model,
         )
 

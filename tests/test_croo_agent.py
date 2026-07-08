@@ -57,6 +57,39 @@ def _capture_factory(payload):
 
 # ---- requirements parsing ---------------------------------------------------
 
+def test_provider_routes_by_service_id():
+    """An order for the events service_id runs the events pipeline; any other
+    service_id (or none) falls through to the default signal pipeline."""
+    sig = lambda req: {"schema": "catalyst.signals"}     # noqa: E731
+    evt = lambda req: {"schema": "catalyst.events"}      # noqa: E731
+
+    def deliver_for(service_id):
+        order = SimpleNamespace(order_id="o", status="paid", negotiation_id="n1",
+                                service_id=service_id)
+        client = FakeClient(negotiation=_neg("{}", nid="n1"), order=order)
+        p = CrooProvider(client, pipeline=sig, services={"EVENTS": evt},
+                         deliver_factory=lambda payload: payload)
+        outcome, _ = asyncio.run(p.handle_paid("o"))
+        assert outcome == "delivered"
+        return client.delivered[0][1]["schema"]
+
+    assert deliver_for("EVENTS") == "catalyst.events"     # routed to events
+    assert deliver_for("OTHER") == "catalyst.signals"     # unknown → default
+    assert deliver_for(None) == "catalyst.signals"        # missing → default
+
+
+def test_events_service_negotiation_skips_coverage():
+    """The events feed serves the whole market, so a covered-assets provider must
+    NOT reject an events order for an uncovered asset."""
+    neg = SimpleNamespace(negotiation_id="n1", requirements='{"assets": "DOGE"}',
+                          service_id="EVENTS")
+    client = FakeClient(negotiation=neg)
+    p = CrooProvider(client, covered_assets=["BTC"], services={"EVENTS": lambda req: {}},
+                     health=lambda: (True, "ok"))
+    outcome, _ = asyncio.run(p.handle_negotiation("n1"))
+    assert outcome == "accepted"                          # coverage skipped for events
+
+
 def test_parse_requirements():
     assert parse_requirements("") == {}
     assert parse_requirements('{"assets": ["BTC"]}') == {"assets": ["BTC"]}

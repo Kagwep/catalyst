@@ -38,7 +38,9 @@ CREATE TABLE IF NOT EXISTS posts (
     assets           TEXT,
     catalyst         TEXT,
     sentiment_model  TEXT,
-    enriched_at      TEXT
+    enriched_at      TEXT,
+    event            TEXT,
+    severity         TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_posts_indexed_at ON posts(indexed_at);
 CREATE INDEX IF NOT EXISTS idx_posts_source     ON posts(source);
@@ -115,6 +117,8 @@ _ENRICH_COLUMNS = {
     "catalyst": "TEXT",
     "sentiment_model": "TEXT",
     "enriched_at": "TEXT",
+    "event": "TEXT",
+    "severity": "TEXT",
 }
 
 _INSERT = """
@@ -224,7 +228,8 @@ def save_enrichments(conn: sqlite3.Connection, items: Iterable[tuple[str, object
         for uri, e in items:
             cur = conn.execute(
                 "UPDATE posts SET sentiment_score=?, sentiment_label=?, assets=?, "
-                "catalyst=?, sentiment_model=?, enriched_at=? WHERE uri=?",
+                "catalyst=?, sentiment_model=?, enriched_at=?, event=?, severity=? "
+                "WHERE uri=?",
                 (
                     e.sentiment_score,
                     e.sentiment_label,
@@ -232,6 +237,8 @@ def save_enrichments(conn: sqlite3.Connection, items: Iterable[tuple[str, object
                     e.catalyst,
                     e.model,
                     enriched_at,
+                    getattr(e, "event", None),
+                    getattr(e, "severity", None),
                     uri,
                 ),
             )
@@ -522,7 +529,7 @@ def fetch_enriched(
     """
     sql = (
         "SELECT uri, source, url, author_handle, indexed_at, text, sentiment_score, "
-        "catalyst, assets, likes, reposts FROM posts "
+        "catalyst, assets, likes, reposts, event, severity FROM posts "
         "WHERE sentiment_model IS NOT NULL AND assets IS NOT NULL AND assets != '[]'"
     )
     params: dict[str, object] = {}
@@ -530,6 +537,24 @@ def fetch_enriched(
         sql += " AND source = :source"
         params["source"] = source
     elif sources:                           # default: restrict to the news sources
+        names = ", ".join(f":src{i}" for i in range(len(sources)))
+        sql += f" AND source IN ({names})"
+        params.update({f"src{i}": s for i, s in enumerate(sources)})
+    return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+
+def fetch_events(conn: sqlite3.Connection, *, sources: tuple[str, ...] | None = NEWS_SOURCES) -> list[dict]:
+    """News-source posts carrying a concrete `event` — input to the catalyst.events
+    feed. Unlike `fetch_enriched`, there is NO asset requirement: market-wide macro
+    or geopolitical events (a Fed decision, a missile strike) move the whole market
+    but carry no ticker, and those are exactly what this feed wants to surface.
+    """
+    sql = (
+        "SELECT uri, source, url, author_handle, indexed_at, text, sentiment_score, "
+        "catalyst, assets, event, severity FROM posts WHERE event IS NOT NULL"
+    )
+    params: dict[str, object] = {}
+    if sources:
         names = ", ".join(f":src{i}" for i in range(len(sources)))
         sql += f" AND source IN ({names})"
         params.update({f"src{i}": s for i, s in enumerate(sources)})

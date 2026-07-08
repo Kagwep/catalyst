@@ -26,7 +26,8 @@ class _StubClient:
 
 def test_anthropic_scorer_maps_structured_output():
     out = SimpleNamespace(
-        sentiment_label="positive", sentiment_score=1.7, assets=["btc", "eth"], catalyst="etf"
+        sentiment_label="positive", sentiment_score=1.7, assets=["btc", "eth"], catalyst="etf",
+        event="Spot BTC ETF approved by regulator", severity="HIGH",
     )
     client = _StubClient(out)
     score = make_anthropic_scorer(model="claude-haiku-4-5", client=client)
@@ -37,6 +38,8 @@ def test_anthropic_scorer_maps_structured_output():
     assert e.sentiment_score == 1.0             # clamped into [-1, 1]
     assert e.assets == ["BTC", "ETH"]           # uppercased
     assert e.catalyst == "etf"
+    assert e.event == "Spot BTC ETF approved by regulator"
+    assert e.severity == "high"                 # normalized to lowercase enum
     # The model id was passed through to the API call.
     assert client.messages.calls[0]["model"] == "claude-haiku-4-5"
 

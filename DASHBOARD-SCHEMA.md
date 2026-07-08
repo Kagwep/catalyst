@@ -77,3 +77,61 @@ signal. Different axes — keep them distinct so buyers aren't confused.
 | `catalyst_notes` | delivery      | object | no       | narration on + has catalysts |
 | `layer_notes`    | delivery      | object | no       | narration on + is an alert (has layers) |
 | `window`         | requirements  | string | no       | buyer chooses a lookback |
+
+---
+
+# Service: `catalyst.events` (the "events" feed)
+
+Second service — breadth product (market-wide catalyst events), distinct from the
+depth `catalyst.signals` service. No LLM at serve time; reads the stored `event` /
+`severity` fields written at enrich time. Delivery uses **array-of-strings** for
+the feed (supported) — never array-of-objects.
+
+## C. Delivery schema — `catalyst.events`
+
+| Field          | Type             | Required | Description |
+| -------------- | ---------------- | -------- | ----------- |
+| `schema`       | string           | **yes**  | Fixed `"catalyst.events"` |
+| `version`      | string           | **yes**  | Schema version, `"2.0"` |
+| `generated_at` | string           | **yes**  | ISO-8601 UTC timestamp the feed was produced |
+| `disclaimer`   | string           | **yes**  | Proposals-only / not-financial-advice notice |
+| `count`        | integer          | **yes**  | Number of events in this delivery (0 allowed) |
+| `events`       | array of strings | **yes**  | The feed, one line per event: `ASSET \| catalyst \| what happened \| direction \| severity \| age`. **Never empty** — a single sentinel line when nothing matched |
+| `lead`         | object           | no       | The single most market-moving event, structured (see sub-fields). Omitted when `count` is 0 |
+| `assets`       | array of strings | no       | Distinct assets referenced across the events |
+| `catalysts`    | array of strings | no       | Distinct catalyst types present (etf, hack, macro, …) |
+| `window_hours` | number           | no       | The resolved lookback window used |
+| `requirements` | object           | no       | Echo of the buyer's filters (present only when filters were sent) |
+
+**`lead`** — register as a generic/free-form object (like `layers`). Sub-fields:
+
+| Sub-field   | Type   | Description |
+| ----------- | ------ | ----------- |
+| `asset`     | string | Ticker, or `MACRO` for market-wide |
+| `catalyst`  | string | Catalyst category |
+| `event`     | string | One-line "what happened" |
+| `direction` | string | bullish / bearish / neutral |
+| `severity`  | string | high / medium / low |
+| `sentiment` | number | −1..+1 market-directional score |
+| `source`    | string | Origin (rss, bluesky, github) |
+| `url`       | string | Link to the source post (may be null) |
+| `at`        | string | ISO-8601 timestamp of the event |
+
+> All non-`yes` fields are **optional** — the backend treats empty `[]` / `{}` /
+> null as *missing* and expires the order. `events` stays required but is
+> guaranteed non-empty (sentinel line on the empty case).
+
+## D. Requirements schema — `catalyst.events` (all optional strings)
+
+The order must work with **no** filters (returns the top events). All fields are
+plain strings — the v2 requirements builder can't register typed numbers or
+string arrays, so multi-value fields are comma-separated.
+
+| Field          | Type   | Required | Description |
+| -------------- | ------ | -------- | ----------- |
+| `assets`       | string | no       | Comma-separated tickers to include, e.g. `BTC,ETH`. Blank = all assets |
+| `catalysts`    | string | no       | Comma-separated catalyst types, e.g. `etf,hack,regulation`. Blank = all |
+| `min_severity` | string | no       | Lowest severity to include: `high` / `medium` / `low`. Blank = `medium` (market-movers only) |
+| `direction`    | string | no       | Filter to `bullish` / `bearish` / `neutral`. Blank = all |
+| `window`       | string | no       | Lookback: `6h` / `3d` / `1w` (bare number = hours). 1h–1w, clamped. Blank = `24h` |
+| `limit`        | string | no       | Max events to return, e.g. `15`. Blank = default (20) |

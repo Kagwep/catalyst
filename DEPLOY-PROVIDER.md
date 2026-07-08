@@ -58,6 +58,7 @@ network ingest happens in the paid path, so delivery stays inside the SLA.
 | ------------------- | ---------------------------------------------------------------------- |
 | `BASE_RPC_URL`      | Base RPC override (defaults to the SDK's; gas is platform-sponsored)   |
 | `ANTHROPIC_API_KEY` | Optional. When set, turns on the provider's grounded narration (`summary`/`catalyst_notes`/`layer_notes`). Unset → deterministic delivery. See §4. |
+| `CROO_EVENTS_SERVICE_ID` | Optional. The `service_id` of the registered `catalyst.events` feed. When set, the provider ALSO serves that second service (routes by `order.service_id`). Unset → signals-only. |
 
 The provider needs `CROO_*` + the two `DATABASE_*` vars and nothing else.
 `--db` is ignored whenever `DATABASE_URL` is set, so the provider always talks
