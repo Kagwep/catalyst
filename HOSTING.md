@@ -15,10 +15,11 @@ GitHub Actions (cron every ~15 min)
 set (see `catalyst/pg.py`), and local SQLite otherwise. Nothing else in the code
 changes — same `open_store()`, same functions.
 
-> **Out of scope:** the Croo provider agent (`croo_agent.py`) opens a long-lived
-> WebSocket and can't run on Actions' short-lived jobs. It needs a persistent
-> host (a small VM / Fly / Render) pointed at the same `DATABASE_URL`. This guide
-> covers ingestion only.
+> **Out of scope here:** the Croo provider agent (`croo_agent.py`) opens a
+> long-lived WebSocket and can't run on Actions' short-lived jobs. It needs a
+> persistent host pointed at the same `DATABASE_URL` — see
+> **[DEPLOY-PROVIDER.md](DEPLOY-PROVIDER.md)** (Railway). This guide covers
+> ingestion only.
 
 ---
 

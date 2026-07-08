@@ -6,6 +6,10 @@ name: poll
 # cycle number continues across runs (stored in Postgres), so the sequence is
 # stable and monotonic.
 #
+# Enrichment: MANDATORY LLM interpretation on Sonnet (--llm-all). Every new post
+# with text is scored by claude-sonnet-5 — the lexicon can't read nuance and the
+# posts are the catalyst/sentiment source. Requires the ANTHROPIC_API_KEY secret.
+#
 # Public repo => unlimited Actions minutes, so the cadence below is free.
 
 on:
@@ -26,7 +30,7 @@ permissions:
 jobs:
   poll:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15   # LLM enrichment is slower than the rule-based path
     env:
       # Required: Supabase Postgres DSN (WITHOUT the password). Presence of this
       # switches the store backend from local SQLite to Postgres.
@@ -40,8 +44,9 @@ jobs:
       # the account password.
       BLUESKY_HANDLE: ${{ secrets.BLUESKY_HANDLE }}
       BLUESKY_APP_PASSWORD: ${{ secrets.BLUESKY_APP_PASSWORD }}
-      # Optional: only used if you enable the matching flags below.
+      # Required: mandatory Sonnet enrichment (--llm-all) needs this.
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      # Optional: only used with --fred.
       FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
     steps:
       - uses: actions/checkout@v4
@@ -50,17 +55,17 @@ jobs:
         run: |
           test -n "$DATABASE_URL" || { echo "::error::DATABASE_URL secret is not set"; exit 1; }
           test -n "$DATABASE_PASSWORD" || { echo "::error::DATABASE_PASSWORD secret is not set"; exit 1; }
+          test -n "$ANTHROPIC_API_KEY" || { echo "::error::ANTHROPIC_API_KEY secret is not set (required for --llm-all Sonnet enrichment)"; exit 1; }
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
 
-      - name: Sync dependencies (with Postgres backend)
-        # Add ,llm here (and pass --llm below) to enable Anthropic enrichment.
-        run: uv sync --extra pg
+      - name: Sync dependencies (Postgres backend + LLM)
+        run: uv sync --extra pg --extra llm
 
-      - name: Run one poll cycle
-        # Mirrors the local poller's defaults (rule-based enrich + planner).
-        # Add --llm for Anthropic scoring, --fred for FRED macro series.
-        run: uv run catalyst poll --once
+      - name: Run one poll cycle (mandatory Sonnet enrichment)
+        # --llm-all: every new post with text is LLM-interpreted on Sonnet (posts
+        # are the catalyst/sentiment source). Add --fred for FRED macro series.
+        run: uv run catalyst poll --once --llm-all --model claude-sonnet-5

@@ -1,0 +1,16 @@
+# Railway service config for the Catalyst Croo provider agent.
+#
+# IMPORTANT: numReplicas MUST stay 1. Two replicas = two WebSocket connections
+# on the same CROO_SDK_KEY (duplicate-key clash) and two processes that could
+# both deliver the same order (the idempotency guard is per-process). Scale by
+# coverage/pricing, never by replica count.
+
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "uv run catalyst croo-provider"
+numReplicas = 1
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

@@ -230,7 +230,8 @@ def _poll_cycle(conn, args, primary, llm_score):
 
     if args.enrich:
         results = hybrid_enrich(
-            fetch_unenriched(conn), llm_score=llm_score, primary_handles=primary
+            fetch_unenriched(conn), llm_score=llm_score, primary_handles=primary,
+            llm_all=getattr(args, "llm_all", False),
         )
         health.enriched = save_enrichments(conn, results)
         health.llm_calls = sum(1 for _, e in results if e.model != "lexicon")
@@ -374,7 +375,7 @@ def _cmd_poll(args: argparse.Namespace) -> None:
         h.strip().lstrip("@") for h in (args.primary or "").split(",") if h.strip()
     )
     llm_score = None
-    if args.enrich and args.llm:
+    if args.enrich and (args.llm or getattr(args, "llm_all", False)):
         from .enrich import make_anthropic_scorer
 
         llm_score = make_anthropic_scorer(model=args.model)  # one client, reused each cycle
@@ -687,6 +688,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="SDK smoke test: accept every order and deliver a hardcoded probe payload "
              "(no pipeline). Proves auth + WS loop + accept/deliver against the real backend.",
     )
+    croo.add_argument(
+        "--no-present", action="store_true",
+        help="disable the grounded LLM narration even if ANTHROPIC_API_KEY is set "
+             "(narration only restates computed numbers; it's on by default when a key exists).",
+    )
+    croo.add_argument("--present-model", default="claude-opus-4-8",
+                      help="model for the narration layer (e.g. claude-haiku-4-5 for cheaper)")
 
     poll = sub.add_parser(
         "poll", parents=[common],
@@ -699,6 +707,8 @@ def build_parser() -> argparse.ArgumentParser:
     poll.add_argument("--enrich", action=argparse.BooleanOptionalAction, default=True)
     poll.add_argument("--plan", action=argparse.BooleanOptionalAction, default=True)
     poll.add_argument("--llm", action="store_true", help="LLM-score candidates during enrich")
+    poll.add_argument("--llm-all", action="store_true",
+                      help="MANDATORY LLM scoring of every post with text (bypass candidate gate). Implies --llm.")
     poll.add_argument("--model", default="claude-opus-4-8")
     poll.add_argument("--primary", default="watcher.guru")
     poll.add_argument("--window", type=float, default=24.0)
@@ -825,6 +835,9 @@ def build_parser() -> argparse.ArgumentParser:
     en.add_argument("--limit", type=int, default=None)
     en.add_argument("--source")
     en.add_argument("--llm", action="store_true", help="LLM-score candidates (needs [llm] extra + API key)")
+    en.add_argument("--llm-all", action="store_true",
+                    help="MANDATORY LLM scoring of every post with text (bypass the candidate "
+                         "gate; posts are the catalyst/sentiment source). Implies --llm.")
     en.add_argument("--model", default="claude-opus-4-8", help="LLM model (e.g. claude-haiku-4-5)")
     en.add_argument("--primary", default="watcher.guru", help="comma-separated high-signal handles")
     en.add_argument("--reenrich", action="store_true", help="re-score already-scored posts")
@@ -1189,11 +1202,13 @@ def main(argv: list[str] | None = None) -> int:
             items = fetch_unenriched(
                 conn, limit=args.limit, source=args.source, reenrich=args.reenrich
             )
-            llm_score = make_anthropic_scorer(model=args.model) if args.llm else None
+            use_llm = args.llm or args.llm_all
+            llm_score = make_anthropic_scorer(model=args.model) if use_llm else None
             primary = frozenset(
                 h.strip().lstrip("@") for h in (args.primary or "").split(",") if h.strip()
             )
-            results = hybrid_enrich(items, llm_score=llm_score, primary_handles=primary)
+            results = hybrid_enrich(items, llm_score=llm_score, primary_handles=primary,
+                                    llm_all=args.llm_all)
             n = save_enrichments(conn, results)
         finally:
             conn.close()
@@ -1228,6 +1243,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "croo-provider":
         import asyncio
+        import logging
+        import os
+
+        # Surface the provider's accept/deliver/settle events (logger.info) — on
+        # stdout locally and in the Railway logs. Without this they're swallowed.
+        logging.basicConfig(
+            level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        )
 
         from .croo_agent import CrooProvider, build_client_from_env, make_no_op_provider
 
@@ -1238,7 +1261,17 @@ def main(argv: list[str] | None = None) -> int:
             print("Croo provider starting in NO-OP mode — accepts every order, delivers a "
                   "hardcoded probe (SDK smoke test, no pipeline). Ctrl-C to stop.", file=sys.stderr)
         else:
-            provider = CrooProvider(client, db_path=args.db, covered_assets=covered)
+            # Optional grounded narration: on only when a key is present and not
+            # opted out. Absent → deterministic delivery, no LLM, no key needed.
+            present = None
+            if not args.no_present and os.environ.get("ANTHROPIC_API_KEY"):
+                from .present import make_anthropic_presenter
+
+                present = make_anthropic_presenter(model=args.present_model)
+                print(f"  narration ON ({args.present_model}) — grounded summary/notes added",
+                      file=sys.stderr)
+            provider = CrooProvider(client, db_path=args.db, covered_assets=covered,
+                                    present=present)
             print("Croo provider starting — Ctrl-C to stop (proposals only, not executed)", file=sys.stderr)
         try:
             asyncio.run(provider.run())

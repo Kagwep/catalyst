@@ -1,0 +1,22 @@
+# Keep the build context small and never ship secrets or local state.
+.env
+.env.*
+catalyst.db
+catalyst.db-*
+*.sqlite
+*.sqlite3
+
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+.git/
+.github/
+*.parquet
+*.csv
+
+# Local scratch / notes that don't belong in the image.
+*.log

@@ -56,19 +56,29 @@ def parse_requirements(raw: str | None):
 # ---------------------------------------------------------------------------
 
 
-def default_pipeline(db_path: str, requirements: dict, *, weights: dict | None = None) -> dict:
+def default_pipeline(
+    db_path: str, requirements: dict, *, weights: dict | None = None, present=None,
+) -> dict:
     """Compute fresh proposals from the store, filter to the buyer's requirements,
     and return the canonical deliverable payload.
 
     Order-driven: reads the already-ingested/enriched store and runs the real
     signal→bias→planner path (no network ingest in the paid path — that's the poll
     loop's job, so delivery stays inside the SLA). The market/momentum modifier is
-    omitted here (it needs a live price fetch); every other layer is applied."""
+    omitted here (it needs a live price fetch); every other layer is applied.
+
+    `present` is an optional grounded narration callable (see present.py): when
+    given, its `summary`/`catalyst_notes`/`layer_notes` are merged onto the flat
+    payload. It only describes the numbers already computed — never changes them —
+    and any failure is swallowed so delivery is never blocked by the LLM."""
     from .derivs import compute_derivs_bias
     from .flows import compute_flow_bias
     from .macro import compute_regime
     from .onchain import compute_supply_bias
-    from .payload import build_payload, flatten_signals, requirements_to_kwargs, select_actions
+    from .payload import (
+        DEFAULT_WINDOW_HOURS, build_payload, flatten_signals, requirements_to_kwargs,
+        requirements_window_hours, select_actions,
+    )
     from .planner import plan
     from .signals import compute_signals
     from .store import (
@@ -76,9 +86,14 @@ def default_pipeline(db_path: str, requirements: dict, *, weights: dict | None =
     )
     from .trend import compute_trend_bias
 
+    # Buyer-selectable lookback: anything from an hour up to a week. Absent →
+    # the default 24h. Trend keeps its own multi-day window (bias-slope context).
+    window_hours = requirements_window_hours(requirements) or DEFAULT_WINDOW_HOURS
+
     conn = open_store(db_path)
     try:
-        sigs = compute_signals(fetch_enriched(conn))
+        enriched = fetch_enriched(conn)
+        sigs = compute_signals(enriched, window_hours=window_hours)
         actions = plan(
             sigs,
             regime=compute_regime(fetch_macro(conn)),
@@ -92,8 +107,21 @@ def default_pipeline(db_path: str, requirements: dict, *, weights: dict | None =
 
     universe = sorted({a.asset for a in actions})
     selected = select_actions(actions, **requirements_to_kwargs(requirements))
-    payload = build_payload(selected, meta={"universe": universe, "requirements": requirements})
-    return flatten_signals(payload)   # Dashboard-builder shape (asset-keyed, no deep nesting)
+    payload = build_payload(selected, meta={
+        "universe": universe, "requirements": requirements, "window_hours": window_hours,
+    })
+    flat = flatten_signals(payload)   # Dashboard-builder shape (asset-keyed, no deep nesting)
+
+    if present is not None:
+        try:
+            from .present import catalyst_headlines
+
+            top_asset = (flat.get("actions") or {}).get("asset")
+            heads = catalyst_headlines(enriched, top_asset, window_hours)
+            flat.update(present(flat, heads))   # adds prose fields only; numbers untouched
+        except Exception as err:  # noqa: BLE001 — narration is optional, never block delivery
+            logger.warning("presenter failed, delivering without narrative: %s", err)
+    return flat
 
 
 def no_op_pipeline(requirements: dict) -> dict:
@@ -192,11 +220,14 @@ class CrooProvider:
     def __init__(
         self, client, *, db_path: str = "catalyst.db", covered_assets=None,
         pipeline=None, health=None, weights: dict | None = None, deliver_factory=None,
+        present=None,
     ):
         self.client = client
         self.db_path = db_path
         self.covered_assets = {a.upper() for a in covered_assets} if covered_assets else None
-        self._pipeline = pipeline or (lambda req: default_pipeline(db_path, req, weights=weights))
+        self._pipeline = pipeline or (
+            lambda req: default_pipeline(db_path, req, weights=weights, present=present)
+        )
         self._health = health or (lambda: default_health(db_path))
         self._deliver_factory = deliver_factory or _default_deliver_factory
         self._delivered: set[str] = set()      # order_ids we've delivered (idempotency)

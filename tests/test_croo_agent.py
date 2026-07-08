@@ -235,6 +235,87 @@ def test_default_pipeline_produces_filtered_canonical_payload(tmp_path):
     assert "universe" in payload                                   # required by registered schema
     assert payload["requirements"] == {"assets": ["BTC"]}          # meta lifted to top level
     assert payload["disclaimer"]                                   # proposal disclaimer present
+    assert payload["window_hours"] == 24.0                         # default lookback echoed
     if payload["actions"]:                                         # if a signal was produced
         assert payload["actions"]["asset"] == "BTC"                # filtered to requirements
         assert payload["actions"]["signal"] in ("alert", "watch")
+
+
+def test_default_pipeline_window_widens_history(tmp_path):
+    """A buyer's lookback (hours → a week) changes how far back the signal layer
+    reads: a 5-day-old catalyst only enters the universe under the wider window."""
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    fresh = (now - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    old = (now - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    db = str(tmp_path / "w.db")
+    conn = open_store(db)
+    try:
+        save_posts(conn, [
+            Post(source="bluesky", uri="fresh", text="$ETH ETF approved, price soars",
+                 indexed_at=fresh, author=Author(handle="watcher.guru"), metrics=Metrics(likes=10)),
+            Post(source="bluesky", uri="old", text="$BTC ETF approved, price soars",
+                 indexed_at=old, author=Author(handle="watcher.guru"), metrics=Metrics(likes=10)),
+        ])
+        from catalyst.enrich import hybrid_enrich
+        from catalyst.store import fetch_unenriched
+        save_enrichments(conn, hybrid_enrich(fetch_unenriched(conn),
+                                             primary_handles=frozenset({"watcher.guru"})))
+    finally:
+        conn.close()
+
+    narrow = default_pipeline(db, {})                 # default 24h
+    wide = default_pipeline(db, {"window": "7d"})      # up to a week
+
+    assert narrow["window_hours"] == 24.0
+    assert wide["window_hours"] == 168.0
+    # The 5-day-old BTC catalyst is out of the 24h window, in under the 7d one.
+    assert "BTC" not in narrow["universe"]
+    assert "BTC" in wide["universe"]
+    assert "ETH" in wide["universe"]                   # fresh post is in both
+
+
+def test_default_pipeline_merges_grounded_narration(tmp_path):
+    """When a `present` callable is supplied, its prose fields land on the payload
+    and the computed numbers are untouched. A presenter failure is swallowed."""
+    from datetime import datetime, timedelta, timezone
+    fresh = (datetime.now(timezone.utc) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    db = str(tmp_path / "n.db")
+    conn = open_store(db)
+    try:
+        save_posts(conn, [
+            Post(source="bluesky", uri="p1", text="$BTC ETF approved, price soars",
+                 indexed_at=fresh, author=Author(handle="watcher.guru"),
+                 metrics=Metrics(likes=10)),
+        ])
+        from catalyst.enrich import hybrid_enrich
+        from catalyst.store import fetch_unenriched
+        save_enrichments(conn, hybrid_enrich(fetch_unenriched(conn),
+                                             primary_handles=frozenset({"watcher.guru"})))
+    finally:
+        conn.close()
+
+    seen = {}
+
+    def stub_present(flat, headlines=None):
+        # a grounded presenter never returns numbers — only prose fields. It is
+        # handed the real catalyst headlines behind the top signal.
+        seen["headlines"] = headlines
+        return {"summary": "grounded one-liner", "catalyst_notes": {"etf": "spot-ETF news"}}
+
+    got = default_pipeline(db, {}, present=stub_present)
+    assert got["summary"] == "grounded one-liner"
+    assert got["catalyst_notes"] == {"etf": "spot-ETF news"}
+    assert got["schema"] == "catalyst.signals"        # deterministic envelope intact
+    assert isinstance(got["actions"], dict)
+    # the presenter received the actual post text (what happened), not just tags
+    assert seen["headlines"] and any("ETF" in h["text"] for h in seen["headlines"])
+
+    def boom(flat, headlines=None):
+        raise RuntimeError("llm down")
+
+    safe = default_pipeline(db, {}, present=boom)      # must not raise
+    assert "summary" not in safe                        # delivered without narrative
+    assert safe["schema"] == "catalyst.signals"

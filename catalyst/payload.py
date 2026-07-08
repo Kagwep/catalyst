@@ -23,6 +23,7 @@ signals; it does not size, place, or manage trades.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 
 SCHEMA = "catalyst.signals"
@@ -283,3 +284,58 @@ def requirements_to_kwargs(requirements: dict | None) -> dict:
         "horizons": _list(_pick("horizon", "horizons")),
         "min_confidence": float(r.get("min_confidence", 0.0) or 0.0),
     }
+
+
+# --- Buyer-selectable lookback window -------------------------------------
+# How far back the signal layer reads. Bounded so an order stays sane: at least
+# an hour of context, at most a week — matching the richer point-in-time history
+# the store now retains (trend adds the multi-day bias slope on top). When a
+# buyer requests nothing, callers fall back to DEFAULT_WINDOW_HOURS.
+MIN_WINDOW_HOURS = 1.0
+MAX_WINDOW_HOURS = 168.0        # 7 days = one week
+DEFAULT_WINDOW_HOURS = 24.0
+
+_WINDOW_UNIT_HOURS = {
+    "h": 1.0, "hr": 1.0, "hrs": 1.0, "hour": 1.0, "hours": 1.0,
+    "d": 24.0, "day": 24.0, "days": 24.0,
+    "w": 168.0, "wk": 168.0, "week": 168.0, "weeks": 168.0,
+}
+
+
+def parse_window_hours(value) -> float | None:
+    """Parse a lookback window into hours, clamped to [1h, 168h] (a week).
+
+    Accepts a bare number (interpreted as hours) or a string with a unit:
+    "6h", "48", "3d", "1w". Returns None when the value is missing or not
+    parseable, so the caller can apply its own default. bool is rejected (it
+    is an int subclass but never a valid duration)."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        hours = float(value)
+    else:
+        m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([a-zA-Z]*)\s*", str(value))
+        if not m:
+            return None
+        unit = (m.group(2) or "h").lower()
+        if unit not in _WINDOW_UNIT_HOURS:
+            return None
+        hours = float(m.group(1)) * _WINDOW_UNIT_HOURS[unit]
+    return max(MIN_WINDOW_HOURS, min(MAX_WINDOW_HOURS, hours))
+
+
+def requirements_window_hours(requirements: dict | None) -> float | None:
+    """The buyer-requested signal lookback in hours, or None if unspecified.
+
+    Reads `window` / `lookback` / `window_hours` (each hours-or-unit-string),
+    then `window_days` (bare number = days). None means "buyer didn't ask" so
+    the pipeline keeps its default — distinct from an unparseable value, which
+    also yields None rather than raising (a lenient service front door)."""
+    r = requirements or {}
+    for key in ("window", "lookback", "window_hours"):
+        if r.get(key) is not None:
+            return parse_window_hours(r.get(key))
+    days = r.get("window_days")
+    if days is not None:
+        return parse_window_hours(days if isinstance(days, str) else f"{float(days)}d")
+    return None

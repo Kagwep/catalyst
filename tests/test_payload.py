@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from catalyst.payload import (
     DISCLAIMER,
+    MAX_WINDOW_HOURS,
+    MIN_WINDOW_HOURS,
     SCHEMA,
     build_payload,
+    parse_window_hours,
     requirements_to_kwargs,
+    requirements_window_hours,
     select_actions,
 )
 from catalyst.planner import plan
@@ -163,3 +167,32 @@ def test_requirements_assets_comma_string_and_singular_key():
     actions = plan([_sig("BTC", 0.5), _sig("ETH", -0.6)])
     picked = select_actions(actions, **requirements_to_kwargs({"assets": "ETH"}))
     assert {a.asset for a in picked} == {"ETH"}
+
+
+def test_parse_window_hours_units_and_clamp():
+    """A buyer can express the lookback as hours, days, or a week — bare number
+    is hours — and it's clamped to [1h, 168h] (a week)."""
+    assert parse_window_hours(6) == 6.0            # bare number = hours
+    assert parse_window_hours("6h") == 6.0
+    assert parse_window_hours("48") == 48.0        # bare string = hours
+    assert parse_window_hours("3d") == 72.0
+    assert parse_window_hours("1w") == 168.0
+    assert parse_window_hours("2 weeks") == MAX_WINDOW_HOURS   # clamped down to a week
+    assert parse_window_hours("0.1h") == MIN_WINDOW_HOURS      # clamped up to an hour
+    assert parse_window_hours(500) == MAX_WINDOW_HOURS
+    # Unparseable / non-duration → None (lenient front door, no raise).
+    assert parse_window_hours("soon") is None
+    assert parse_window_hours(None) is None
+    assert parse_window_hours(True) is None        # bool is not a duration
+
+
+def test_requirements_window_hours_keys_and_default():
+    """window / lookback / window_hours read as hours-or-unit; window_days as
+    days. Absent → None so the pipeline keeps its own default."""
+    assert requirements_window_hours({"window": "3d"}) == 72.0
+    assert requirements_window_hours({"lookback": "12h"}) == 12.0
+    assert requirements_window_hours({"window_hours": 36}) == 36.0
+    assert requirements_window_hours({"window_days": 5}) == 120.0
+    assert requirements_window_hours({"window_days": "1w"}) == 168.0
+    assert requirements_window_hours({}) is None
+    assert requirements_window_hours(None) is None

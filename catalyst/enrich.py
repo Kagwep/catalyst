@@ -152,11 +152,17 @@ def hybrid_enrich(
     llm_score: Callable[[str], Enrichment] | None = None,
     primary_handles: frozenset[str] = frozenset(),
     score_threshold: float = 0.3,
+    llm_all: bool = False,
 ) -> list[tuple[str, Enrichment]]:
     """Score items (dicts with uri/text/author_handle). Returns (uri, Enrichment) pairs.
 
-    Every item gets a lexicon score; candidates additionally get an LLM score
-    when `llm_score` is provided (LLM failures fall back to the lexicon result).
+    Every item gets a lexicon score; an LLM score is layered on top when
+    `llm_score` is provided. By default only *candidates* get the LLM call (cost
+    control on the firehose). `llm_all=True` makes LLM interpretation MANDATORY
+    for every post that has text — the lexicon can't read nuance, and posts are
+    the catalyst-bearing sentiment source, so their interpretation shouldn't be
+    gated. Only new posts are enriched per cycle, so the call volume stays small.
+    LLM failures fall back to the lexicon result, per item.
     """
     lex = LexiconScorer()
     out: list[tuple[str, Enrichment]] = []
@@ -167,7 +173,10 @@ def hybrid_enrich(
         text = it.get("text", "") or ""
         e = lex.score(text)
         primary = it.get("author_handle") in primary_handles
-        if llm_score and is_candidate(e, is_primary=primary, threshold=score_threshold):
+        use_llm = bool(llm_score) and bool(text.strip()) and (
+            llm_all or is_candidate(e, is_primary=primary, threshold=score_threshold)
+        )
+        if use_llm:
             try:
                 e = llm_score(text)
             except Exception as err:  # noqa: BLE001 — never let one call sink the batch

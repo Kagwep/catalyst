@@ -501,17 +501,38 @@ def fetch_market(conn: sqlite3.Connection) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def fetch_enriched(conn: sqlite3.Connection, *, source: str | None = None) -> list[dict]:
-    """Enriched rows that carry at least one asset — the input to the signal layer."""
+# The news/text sources whose sentiment feeds the signal layer. Numeric data
+# feeds (derivs, market, onchain, staking, defillama, snapshot) also get an asset
+# ticker — a derivs "BTCUSDT open interest" post tags BTC — but they carry no
+# directional view, so counting them as sentiment dilutes the news read toward
+# neutral. They already feed their OWN bias layers (fetch_derivs/market/onchain/…),
+# so we exclude them here. macro/flows are already excluded (they carry no ticker).
+NEWS_SOURCES = ("bluesky", "rss", "github")
+
+
+def fetch_enriched(
+    conn: sqlite3.Connection, *, source: str | None = None,
+    sources: tuple[str, ...] | None = NEWS_SOURCES,
+) -> list[dict]:
+    """Enriched rows that carry at least one asset — the input to the signal layer.
+
+    Defaults to the news sources (`NEWS_SOURCES`) so numeric data feeds don't
+    dilute sentiment. Pass an explicit `source=` for a single source (bypasses
+    the allowlist, e.g. for display/query), or `sources=None` for every source.
+    """
     sql = (
         "SELECT uri, source, url, author_handle, indexed_at, text, sentiment_score, "
         "catalyst, assets, likes, reposts FROM posts "
         "WHERE sentiment_model IS NOT NULL AND assets IS NOT NULL AND assets != '[]'"
     )
     params: dict[str, object] = {}
-    if source:
+    if source:                              # explicit single source overrides the allowlist
         sql += " AND source = :source"
         params["source"] = source
+    elif sources:                           # default: restrict to the news sources
+        names = ", ".join(f":src{i}" for i in range(len(sources)))
+        sql += f" AND source IN ({names})"
+        params.update({f"src{i}": s for i, s in enumerate(sources)})
     return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
 

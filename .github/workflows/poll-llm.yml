@@ -53,5 +53,8 @@ jobs:
       - name: Sync dependencies (Postgres backend + LLM)
         run: uv sync --extra pg --extra llm
 
-      - name: Run one poll cycle with LLM enrichment
-        run: uv run catalyst poll --once --llm
+      - name: Run one poll cycle with mandatory LLM enrichment (Sonnet)
+        # --llm-all: every new post with text is LLM-interpreted (posts are the
+        # catalyst/sentiment source; the lexicon can't read nuance). Only new
+        # posts are scored per cycle, so Sonnet volume stays modest.
+        run: uv run catalyst poll --once --llm-all --model claude-sonnet-5
