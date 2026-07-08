@@ -124,15 +124,71 @@ def test_forced_provider_skips_the_chain(monkeypatch):
     assert posts[0].raw["provider"] == "bybit"
 
 
+def block_binance_and_bybit():
+    respx.get(url__startswith=derivs.FUNDING_URL).mock(return_value=httpx.Response(451, text=""))
+    respx.get(url__startswith=derivs.OI_HIST_URL).mock(return_value=httpx.Response(451, text=""))
+    respx.get(url__startswith=derivs.BYBIT_FUNDING_URL).mock(return_value=httpx.Response(403, text=""))
+    respx.get(url__startswith=derivs.BYBIT_TICKERS_URL).mock(return_value=httpx.Response(403, text=""))
+
+
+@respx.mock
+def test_kraken_is_third_and_normalizes_hourly_funding_to_8h():
+    block_binance_and_bybit()
+    respx.get(url__startswith=derivs.KRAKEN_FUNDING_URL).mock(
+        return_value=httpx.Response(200, json={"rates": [
+            {"timestamp": "2026-07-01T00:00:00.000Z", "relativeFundingRate": 0.0000125},
+            {"timestamp": "2026-07-01T01:00:00.000Z", "relativeFundingRate": 0.000025},
+        ]})
+    )
+    posts = fetch_funding(["BTC"], limit=1)  # limit slices to the newest entry
+    assert len(posts) == 1
+    assert posts[0].raw["provider"] == "kraken"
+    assert posts[0].raw["funding_rate"] == pytest.approx(0.0002)  # 0.000025 × 8
+    assert posts[0].text.startswith("[DERIVS] BTCUSDT ")  # canonical label, not PF_XBTUSD
+    assert "PF_XBTUSD" in posts[0].url
+
+
+@respx.mock
+def test_hyperliquid_is_last_resort_and_normalizes_to_8h():
+    block_binance_and_bybit()
+    respx.get(url__startswith=derivs.KRAKEN_FUNDING_URL).mock(
+        return_value=httpx.Response(403, text="")
+    )
+    respx.post(derivs.HYPERLIQUID_INFO_URL).mock(
+        return_value=httpx.Response(200, json=[{"coin": "BTC", "fundingRate": "0.0000125",
+                                                "time": TS}])
+    )
+    posts = fetch_funding(["BTC"])
+    assert posts[0].raw["provider"] == "hyperliquid"
+    assert posts[0].raw["funding_rate"] == pytest.approx(0.0001)  # 0.0000125 × 8
+    assert posts[0].uri == f"derivs:funding:BTC:{TS}"
+
+
+@respx.mock
+def test_kraken_oi_is_coin_times_mark():
+    block_binance_and_bybit()
+    respx.get(url__startswith=derivs.KRAKEN_TICKERS_URL).mock(
+        return_value=httpx.Response(200, json={
+            "serverTime": "2026-07-01T00:00:00.000Z",
+            "tickers": [{"symbol": "PF_XBTUSD", "openInterest": 100.0, "markPrice": 90000.0}],
+        })
+    )
+    posts = fetch_open_interest(["BTC"])
+    assert posts[0].raw["provider"] == "kraken"
+    assert posts[0].raw["oi_usd"] == pytest.approx(9_000_000.0)
+
+
 @respx.mock
 def test_all_providers_failing_raises_a_combined_error():
-    respx.get(url__startswith=derivs.FUNDING_URL).mock(return_value=httpx.Response(451, text=""))
-    respx.get(url__startswith=derivs.BYBIT_FUNDING_URL).mock(
-        return_value=httpx.Response(200, json={"retCode": 10001, "retMsg": "params error"})
+    block_binance_and_bybit()
+    respx.get(url__startswith=derivs.KRAKEN_FUNDING_URL).mock(
+        return_value=httpx.Response(403, text="")
     )
+    respx.post(derivs.HYPERLIQUID_INFO_URL).mock(return_value=httpx.Response(500, text=""))
     with pytest.raises(RuntimeError, match="binance.*451") as e:
         fetch_funding(["BTC"])
-    assert "bybit" in str(e.value)
+    for provider in ("bybit", "kraken", "hyperliquid"):
+        assert provider in str(e.value)
 
 
 @respx.mock

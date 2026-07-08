@@ -9,10 +9,34 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import bluesky, rss
 from .models import Post
+
+
+def _hours_ago_iso(hours: float) -> str:
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+
+
+def _created_dt(p: Post) -> datetime | None:
+    if not p.created_at:
+        return None
+    try:
+        return datetime.fromisoformat(p.created_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def fresh_only(posts: list[Post], max_age_hours: float | None) -> list[Post]:
+    """Drop posts whose created_at is older than the cutoff. Author feeds carry
+    reposts and pinned posts whose *creation* date can be months old even when
+    the feed item is new; a missing/unparseable created_at is kept."""
+    if not max_age_hours:
+        return posts
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+    return [p for p in posts if (dt := _created_dt(p)) is None or dt >= cutoff]
 
 
 def dedupe_newest(posts: list[Post]) -> list[Post]:
@@ -39,7 +63,8 @@ def load_handles(path: str) -> list[str]:
     return handles
 
 
-def fetch_accounts(handles: list[str], *, max: int = 25) -> list[Post]:
+def fetch_accounts(handles: list[str], *, max: int = 25,
+                   max_age_hours: float | None = None) -> list[Post]:
     """Fetch author feeds for a list of handles; a bad handle is skipped."""
     results: list[Post] = []
     for h in handles:
@@ -47,7 +72,7 @@ def fetch_accounts(handles: list[str], *, max: int = 25) -> list[Post]:
             results.extend(bluesky.get_author_feed(h, max=max))
         except Exception as err:  # noqa: BLE001 — one bad handle shouldn't fail the batch
             print(f"account @{h} skipped: {err}", file=sys.stderr)
-    return dedupe_newest(results)
+    return dedupe_newest(fresh_only(results, max_age_hours))
 
 
 def _safe(label: str, fn) -> list[Post]:
@@ -65,26 +90,34 @@ def run_config(config_path: str) -> list[Post]:
 
     # Primary signal first: the handle file, then any explicit accounts.
     # (fetch_accounts already isolates per-handle failures.)
+    age_cap = cfg.get("accounts_max_age_hours")
     if cfg.get("accounts_file"):
         results.extend(
-            fetch_accounts(load_handles(cfg["accounts_file"]), max=cfg.get("accounts_max", 25))
+            fetch_accounts(load_handles(cfg["accounts_file"]),
+                           max=cfg.get("accounts_max", 25), max_age_hours=age_cap)
         )
     for a in cfg.get("accounts", []):
         results.extend(
-            _safe(
-                f"account @{a['actor']}",
-                lambda a=a: bluesky.get_author_feed(
-                    a["actor"], max=a.get("max", 50), filter=a.get("filter")
+            fresh_only(
+                _safe(
+                    f"account @{a['actor']}",
+                    lambda a=a: bluesky.get_author_feed(
+                        a["actor"], max=a.get("max", 50), filter=a.get("filter")
+                    ),
                 ),
+                a.get("max_age_hours", age_cap),
             )
         )
     # Depth: keyword searches and RSS feeds. Each isolated.
     for k in cfg.get("keywords", []):
+        since = k.get("since") or (
+            _hours_ago_iso(k["since_hours"]) if k.get("since_hours") else None
+        )
         results.extend(
             _safe(
                 f'search "{k["q"]}"',
-                lambda k=k: bluesky.search_posts(
-                    k["q"], max=k.get("max", 25), sort=k.get("sort"), since=k.get("since")
+                lambda k=k, since=since: bluesky.search_posts(
+                    k["q"], max=k.get("max", 25), sort=k.get("sort"), since=since
                 ),
             )
         )

@@ -1,12 +1,13 @@
 {
   "accounts_file": "news-crypto-blue-sky.txt",
   "accounts_max": 25,
+  "accounts_max_age_hours": 24,
 
   "keywords": [
-    { "q": "mainnet launch", "sort": "latest", "max": 25 },
-    { "q": "protocol upgrade", "sort": "latest", "max": 25 },
-    { "q": "token listing", "sort": "latest", "max": 25 },
-    { "q": "ETF approval", "sort": "latest", "max": 25 }
+    { "q": "mainnet launch", "sort": "latest", "max": 25, "since_hours": 24 },
+    { "q": "protocol upgrade", "sort": "latest", "max": 25, "since_hours": 24 },
+    { "q": "token listing", "sort": "latest", "max": 25, "since_hours": 24 },
+    { "q": "ETF approval", "sort": "latest", "max": 25, "since_hours": 24 }
   ],
 
   "feeds": [

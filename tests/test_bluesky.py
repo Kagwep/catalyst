@@ -85,6 +85,12 @@ def set_credentials(monkeypatch):
     monkeypatch.setenv("BLUESKY_APP_PASSWORD", "xxxx-xxxx-xxxx-xxxx")
 
 
+def test_leading_at_is_stripped_from_the_handle(monkeypatch):
+    monkeypatch.setenv("BLUESKY_HANDLE", "@oracle.bsky.social")
+    monkeypatch.setenv("BLUESKY_APP_PASSWORD", "xxxx-xxxx-xxxx-xxxx")
+    assert bluesky._credentials() == ("oracle.bsky.social", "xxxx-xxxx-xxxx-xxxx")
+
+
 @respx.mock
 def test_with_credentials_logs_in_and_searches_via_pds(monkeypatch):
     set_credentials(monkeypatch)

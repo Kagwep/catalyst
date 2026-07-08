@@ -86,12 +86,13 @@ adapter logs in to the PDS and makes authenticated XRPC calls, which are not
 IP-blocked. Create the app password at Bluesky **Settings → Privacy and
 Security → App Passwords**.
 
-**Derivs on Actions runners:** `fapi.binance.com` returns 451 from US
-datacenter IPs (where the runners sit), so the derivs layer runs a provider
-chain — Binance first, **Bybit v5 fallback** (also keyless). Hosted cycles land
-on Bybit automatically; nothing to configure. Set `DERIVS_PROVIDER=bybit` (or
-`binance`) to force one. If a hosted cycle still shows derivs as
-`source_silent`, check the run log for the combined provider error.
+**Derivs on Actions runners:** `fapi.binance.com` returns 451 and Bybit 403s
+from US datacenter IPs (where the runners sit), so the derivs layer runs a
+provider chain — **Binance → Bybit → Kraken Futures → Hyperliquid**, all
+keyless. Hosted cycles fall through until one answers; nothing to configure.
+Set `DERIVS_PROVIDER=binance|bybit|kraken|hyperliquid` to force one. If a
+hosted cycle still shows derivs as `source_silent`, the run log carries the
+combined per-provider error.
 
 **Known loss on Actions runners (auth can't fix it):** farside.co.uk (ETF
 flows) is behind Cloudflare bot protection that 403s datacenter IPs. The

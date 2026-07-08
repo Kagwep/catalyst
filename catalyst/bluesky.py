@@ -30,8 +30,9 @@ _auth_client: httpx.Client | None = None
 
 
 def _credentials() -> tuple[str, str] | None:
-    handle = os.environ.get("BLUESKY_HANDLE")
-    password = os.environ.get("BLUESKY_APP_PASSWORD")
+    # A leading @ is display convention; the API wants the bare identifier.
+    handle = os.environ.get("BLUESKY_HANDLE", "").lstrip("@").strip()
+    password = os.environ.get("BLUESKY_APP_PASSWORD", "").strip()
     return (handle, password) if handle and password else None
 
 

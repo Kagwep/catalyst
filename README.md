@@ -116,7 +116,7 @@ so adding a data source never disturbs the layers above it.
 | **Staking queue** | ETH validator entry queue (beacon node, direct, no key) → per-asset supply sink | ✅ |
 | **Market / momentum** | Price technicals RSI/MACD (DefiLlama prices) + Fear & Greed (alternative.me, no key) → per-asset momentum bias | ✅ |
 | **On-chain actions** | Proxy upgrades, timelocked governance, treasury moves — from Ethereum event logs (public JSON-RPC, no key) → per-asset upgrade/timelock/treasury catalysts | ✅ |
-| **Derivatives** | Perp funding + open interest (Binance → Bybit fallback, no key) → per-asset positioning bias (crowded longs/shorts fade the aligned trade) | ✅ |
+| **Derivatives** | Perp funding + open interest (Binance → Bybit → Kraken → Hyperliquid, no key) → per-asset positioning bias (crowded longs/shorts fade the aligned trade) | ✅ |
 
 A **`protocols.json` registry** ties each protocol to its GitHub repos, Snapshot
 space, DeFiLlama slug, and **token symbol** — so a release or governance proposal
@@ -421,9 +421,10 @@ history, this layer is **backtestable today** (no snapshotting needed).
 Keyless perp **funding + open interest** → a per-asset **positioning
 bias**: crowded longs fade bullishness, crowded shorts fade bearishness (the
 aligned trade is the crowded one, so it's the one to be wary of). Data comes
-from a provider chain — Binance first, Bybit v5 fallback (Binance 451s US
-datacenter IPs, e.g. GitHub Actions runners); force one with
-`DERIVS_PROVIDER=binance|bybit`.
+from a provider chain — Binance → Bybit → Kraken Futures → Hyperliquid
+(Binance and Bybit block US datacenter IPs, e.g. GitHub Actions runners);
+hourly-funding providers are normalized to 8h-equivalent rates. Force one with
+`DERIVS_PROVIDER=binance|bybit|kraken|hyperliquid`.
 
 ```bash
 catalyst derivs --save --db oracle.db           # funding + OI per asset, persist
@@ -609,7 +610,8 @@ deliverable), so a webhook or a Croo delivery treats both identically.
 {
   "accounts_file": "news-crypto-blue-sky.txt",   // one @handle per line
   "accounts_max": 25,
-  "keywords": [ { "q": "mainnet launch", "sort": "latest", "max": 25 } ],
+  "accounts_max_age_hours": 24,   // drop feed items whose post is older (old reposts/pins)
+  "keywords": [ { "q": "mainnet launch", "sort": "latest", "max": 25, "since_hours": 24 } ],
   "feeds": [
     { "url": "https://feeds.bbci.co.uk/news/rss.xml", "max": 25 },
     "https://github.com/ethereum/go-ethereum/releases.atom"   // protocol releases

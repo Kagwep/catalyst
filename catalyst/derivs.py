@@ -12,11 +12,14 @@ to squeeze up), −1 = crowded longs (bearish, over-leveraged)**. So in the plan
 it damps a buy into crowded longs and boosts a buy into crowded shorts.
 
 Data is keyless perp market data behind a **provider chain**: Binance USDⓈ-M
-Futures first (richer history, USD OI series), Bybit v5 as fallback — both
-free, no key. Binance returns 451 from US datacenter IPs (GitHub Actions
-runners), so hosted cycles land on Bybit automatically; the first provider
-that answers is remembered for the rest of the process, and `DERIVS_PROVIDER`
-(`binance`|`bybit`) forces one. The historical funding endpoint returns a
+Futures first (richer history, USD OI series), then Bybit v5, then Kraken
+Futures, then Hyperliquid — all free, no key. Binance 451s and Bybit 403s US
+datacenter IPs (GitHub Actions runners), so hosted cycles fall through to
+Kraken/Hyperliquid automatically; the first provider that answers is
+remembered for the rest of the process, and `DERIVS_PROVIDER`
+(`binance`|`bybit`|`kraken`|`hyperliquid`) forces one. Kraken and Hyperliquid
+pay funding **hourly**, so their rates are normalized ×8 to the 8h-equivalent
+the bias scale expects. The historical funding endpoint returns a
 **dated** series (every 8h), so this layer is backtestable by dated-input
 replay like flows; open interest is fetched as dated context. Each
 `source="derivs"` post carries its signal in `raw` (read by the bias layer, not
@@ -39,11 +42,16 @@ FUNDING_URL = "https://fapi.binance.com/fapi/v1/fundingRate"
 OI_HIST_URL = "https://fapi.binance.com/futures/data/openInterestHist"
 BYBIT_FUNDING_URL = "https://api.bybit.com/v5/market/funding/history"
 BYBIT_TICKERS_URL = "https://api.bybit.com/v5/market/tickers"
+KRAKEN_FUNDING_URL = "https://futures.kraken.com/derivatives/api/v4/historicalfundingrates"
+KRAKEN_TICKERS_URL = "https://futures.kraken.com/derivatives/api/v3/tickers"
+HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info"
 _HEADERS = {"Accept": "application/json", "User-Agent": "Catalyst/0.1 (+https://github.com/catalyst)"}
 
-PROVIDERS = ("binance", "bybit")
+PROVIDERS = ("binance", "bybit", "kraken", "hyperliquid")
 _TRADE_URLS = {"binance": "https://www.binance.com/en/futures/{sym}",
-               "bybit": "https://www.bybit.com/trade/usdt/{sym}"}
+               "bybit": "https://www.bybit.com/trade/usdt/{sym}",
+               "kraken": "https://futures.kraken.com/trade/futures/{sym}",
+               "hyperliquid": "https://app.hyperliquid.xyz/trade/{sym}"}
 _active_provider: str | None = None  # sticky: first provider that answered
 
 # Clean ticker → perp symbol. Extend by adding a line.
@@ -111,8 +119,38 @@ def _bybit_list(data: dict, what: str) -> list[dict]:
     return (data.get("result") or {}).get("list") or []
 
 
-def _funding_rows(provider: str, sym: str, limit: int) -> list[tuple[int, float]]:
-    """(timestamp_ms, funding_rate) rows, oldest-to-newest order not guaranteed."""
+def _post(url: str, payload: dict, *, timeout: float = 30.0):
+    resp = httpx.post(url, json=payload, headers=_HEADERS, timeout=timeout, follow_redirects=True)
+    if resp.status_code != 200:
+        raise RuntimeError(f"derivs {url} failed: {resp.status_code} {resp.reason_phrase}")
+    return resp.json()
+
+
+def _native_symbol(provider: str, asset: str) -> str:
+    """Provider's own market symbol (binance/bybit share the USDT-perp names)."""
+    a = asset.upper()
+    if provider == "kraken":
+        return f"PF_{'XBT' if a == 'BTC' else a}USD"
+    if provider == "hyperliquid":
+        return a
+    return _symbol(a)
+
+
+def _iso_to_ms(s: str) -> int:
+    return int(datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp() * 1000)
+
+
+def _now_ms() -> int:
+    return int(datetime.now(timezone.utc).timestamp() * 1000)
+
+
+def _funding_rows(provider: str, asset: str, limit: int) -> list[tuple[int, float]]:
+    """(timestamp_ms, funding_rate per 8h) rows, order not guaranteed.
+
+    Kraken and Hyperliquid pay hourly, so their rates are ×8 to the
+    8h-equivalent that DEFAULT_FUNDING_SCALE (and the [DERIVS] text) assumes.
+    """
+    sym = _native_symbol(provider, asset)
     if provider == "binance":
         rows = _get(FUNDING_URL, {"symbol": sym, "limit": limit})
         return [(int(r["fundingTime"]), float(r.get("fundingRate") or 0.0))
@@ -122,13 +160,26 @@ def _funding_rows(provider: str, sym: str, limit: int) -> list[tuple[int, float]
                                         "limit": min(limit, 200)})
         return [(int(r["fundingRateTimestamp"]), float(r.get("fundingRate") or 0.0))
                 for r in _bybit_list(data, "funding") if r.get("fundingRateTimestamp")]
+    if provider == "kraken":
+        data = _get(KRAKEN_FUNDING_URL, {"symbol": sym})
+        rates = data.get("rates") or []
+        return [(_iso_to_ms(r["timestamp"]), float(r["relativeFundingRate"]) * 8.0)
+                for r in rates[-limit:]
+                if r.get("timestamp") and r.get("relativeFundingRate") is not None]
+    if provider == "hyperliquid":
+        rows = _post(HYPERLIQUID_INFO_URL, {"type": "fundingHistory", "coin": sym,
+                                            "startTime": _now_ms() - limit * 3_600_000})
+        return [(int(r["time"]), float(r.get("fundingRate") or 0.0) * 8.0)
+                for r in rows if r.get("time") is not None]
     raise RuntimeError(f"unknown provider {provider!r}")
 
 
-def _oi_rows(provider: str, sym: str, period: str, limit: int) -> list[tuple[int, float]]:
-    """(timestamp_ms, oi_usd) rows. Bybit's OI history is coin-denominated, so
-    there we take the single current USD value from tickers — the bias only
-    reads the latest point, and the store accretes a dated series over cycles."""
+def _oi_rows(provider: str, asset: str, period: str, limit: int) -> list[tuple[int, float]]:
+    """(timestamp_ms, oi_usd) rows. Only Binance has a USD-denominated OI
+    *history*; the others expose current OI (coin-denominated where noted), so
+    there we take one current USD point — the bias only reads the latest, and
+    the store accretes a dated series over cycles."""
+    sym = _native_symbol(provider, asset)
     if provider == "binance":
         rows = _get(OI_HIST_URL, {"symbol": sym, "period": period, "limit": limit})
         return [(int(r["timestamp"]), float(r.get("sumOpenInterestValue") or 0.0))
@@ -138,8 +189,25 @@ def _oi_rows(provider: str, sym: str, period: str, limit: int) -> list[tuple[int
         items = _bybit_list(data, "tickers")
         if not items:
             return []
-        ts = int(data.get("time") or datetime.now(timezone.utc).timestamp() * 1000)
+        ts = int(data.get("time") or _now_ms())
         return [(ts, float(items[0].get("openInterestValue") or 0.0))]
+    if provider == "kraken":
+        data = _get(KRAKEN_TICKERS_URL, {})
+        tick = next((t for t in data.get("tickers") or [] if t.get("symbol") == sym), None)
+        if tick is None:
+            raise RuntimeError(f"kraken tickers: no symbol {sym}")
+        # PF_ contracts are 1 coin, so OI(coin) × mark = USD.
+        oi_usd = float(tick.get("openInterest") or 0.0) * float(tick.get("markPrice") or 0.0)
+        ts = _iso_to_ms(data["serverTime"]) if data.get("serverTime") else _now_ms()
+        return [(ts, oi_usd)]
+    if provider == "hyperliquid":
+        meta, ctxs = _post(HYPERLIQUID_INFO_URL, {"type": "metaAndAssetCtxs"})
+        names = [u.get("name") for u in meta.get("universe") or []]
+        if sym not in names:
+            raise RuntimeError(f"hyperliquid: no asset {sym}")
+        ctx = ctxs[names.index(sym)]
+        oi_usd = float(ctx.get("openInterest") or 0.0) * float(ctx.get("markPx") or 0.0)
+        return [(_now_ms(), oi_usd)]
     raise RuntimeError(f"unknown provider {provider!r}")
 
 
@@ -149,18 +217,20 @@ def fetch_funding(assets: list[str] | None = None, *, limit: int = 30,
     assets = assets or ["BTC", "ETH"]
 
     def pull(provider: str) -> dict[str, list[tuple[int, float]]]:
-        return {asset: _funding_rows(provider, _symbol(asset), limit) for asset in assets}
+        return {asset: _funding_rows(provider, asset, limit) for asset in assets}
 
     provider, per_asset = _with_provider(pull)
     out: list[Post] = []
     for asset, rows in per_asset.items():
+        # Text/raw keep the canonical exchange-style label (BTCUSDT) whatever
+        # the provider, so it can never read as a bare ticker downstream.
         sym = _symbol(asset)
         for ts, rate in rows:
             iso = _iso_ms(ts)
             out.append(Post(
                 source="derivs",
                 uri=f"derivs:funding:{asset.upper()}:{ts}",
-                url=_TRADE_URLS[provider].format(sym=sym),
+                url=_TRADE_URLS[provider].format(sym=_native_symbol(provider, asset)),
                 text=f"[DERIVS] {sym} perp funding {rate * 100:+.4f}% (8h)",
                 created_at=iso, indexed_at=iso,
                 author=Author(handle="derivs", display_name=f"{sym} funding"),
@@ -176,7 +246,7 @@ def fetch_open_interest(assets: list[str] | None = None, *, period: str = "1d",
     assets = assets or ["BTC", "ETH"]
 
     def pull(provider: str) -> dict[str, list[tuple[int, float]]]:
-        return {asset: _oi_rows(provider, _symbol(asset), period, limit) for asset in assets}
+        return {asset: _oi_rows(provider, asset, period, limit) for asset in assets}
 
     provider, per_asset = _with_provider(pull)
     out: list[Post] = []
@@ -187,7 +257,7 @@ def fetch_open_interest(assets: list[str] | None = None, *, period: str = "1d",
             out.append(Post(
                 source="derivs",
                 uri=f"derivs:oi:{asset.upper()}:{ts}",
-                url=_TRADE_URLS[provider].format(sym=sym),
+                url=_TRADE_URLS[provider].format(sym=_native_symbol(provider, asset)),
                 text=f"[DERIVS] {sym} open interest ${oi_usd / 1e6:,.0f}M",
                 created_at=iso, indexed_at=iso,
                 author=Author(handle="derivs", display_name=f"{sym} OI"),
