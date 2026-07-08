@@ -102,19 +102,73 @@ source is replaced or the poller moves to a box with a clean IP.
 
 ## 4. Run it
 
-The workflow (`.github/workflows/poll.yml`) runs every 15 minutes. To test
+The workflow (`.github/workflows/poll.yml`) has a `*/15` cron. To test
 immediately: repo **Actions → poll → Run workflow** (the `workflow_dispatch`
 button). Watch the run; on success, open the Supabase **Table editor** and you'll
 see rows landing in `posts` and `cycle_health`.
+
+> **GitHub's cron is best-effort and it shows.** On this repo the scheduler
+> delivered ~1 run/hour with multi-hour dead zones, while manual dispatches ran
+> instantly every time. For a real 15-minute cadence, set up the Supabase
+> pinger in §5 — the GitHub cron then just becomes a harmless backup.
 
 The cycle number continues across runs (it's read from `cycle_health` in
 Postgres), so the ops sequence stays monotonic even though each run is a fresh
 container.
 
+## 5. Exact 15-minute cadence (Supabase pinger)
+
+GitHub treats `workflow_dispatch` API calls like your manual clicks — immediate
+and reliable. So Supabase `pg_cron` (exact) fires every 15 minutes → calls the
+`poll-dispatch` Edge Function (`supabase/functions/poll-dispatch/index.ts`) →
+which POSTs to GitHub's API to dispatch `poll.yml`. Setup, once:
+
+1. **Create a fine-grained GitHub PAT** — github.com → Settings → Developer
+   settings → Personal access tokens → Fine-grained tokens → Generate new.
+   Repository access: **only this repo**. Repository permissions: **Actions →
+   Read and write**. Nothing else. Copy the `github_pat_…` value.
+
+2. **Generate a shared secret** for the function (any random string):
+
+   ```powershell
+   uv run python -c "import secrets; print(secrets.token_urlsafe(32))"
+   ```
+
+3. **Deploy the function + set its secrets** (Supabase CLI via npx; log in
+   with `npx supabase login` first):
+
+   ```powershell
+   npx supabase functions deploy poll-dispatch --project-ref tqkwztozcoyekpacwqnq
+   npx supabase secrets set --project-ref tqkwztozcoyekpacwqnq GH_PAT=github_pat_… DISPATCH_SECRET=<step-2-value>
+   ```
+
+   (`supabase/config.toml` sets `verify_jwt = false` for this function — it
+   authenticates with the `x-dispatch-secret` header instead, so no Supabase
+   key ever appears in SQL. No-CLI alternative: paste `index.ts` into
+   Dashboard → Edge Functions → Deploy via editor, toggle **Verify JWT off**,
+   and add the two secrets under Edge Functions → Secrets.)
+
+4. **Smoke-test the function** — expect `{"dispatched": true, …}` and a new
+   `poll` run appearing on GitHub's Actions tab:
+
+   ```powershell
+   curl.exe -s -X POST -H "x-dispatch-secret: <step-2-value>" https://tqkwztozcoyekpacwqnq.supabase.co/functions/v1/poll-dispatch
+   ```
+
+5. **Schedule it**: open `supabase/poll_cron.sql`, replace `<DISPATCH_SECRET>`
+   with the step-2 value, and run it in the Supabase **SQL editor**. It enables
+   `pg_cron` + `pg_net` and (re)creates the `poll-dispatch-15m` job. The file's
+   footer comments show how to verify, watch responses, and unschedule.
+
+Afterward every quarter-hour lands a `workflow_dispatch` run; the concurrency
+group in `poll.yml` already prevents overlap with any straggling GitHub-cron
+run. Free-tier note: pg_cron + pg_net + Edge Functions are all on the free
+plan, and ~2,900 function calls/month is far inside the 500K quota.
+
 ### Tuning
 
-- **Cadence:** edit the `cron:` in `poll.yml`. GitHub may fire scheduled runs a
-  few minutes late under load — the pipeline tolerates jitter.
+- **Cadence:** edit the schedule in `supabase/poll_cron.sql` (the reliable
+  clock) — and optionally the `cron:` in `poll.yml` (the best-effort backup).
 - **LLM enrichment:** a ready-made variant lives in
   `.github/workflows/poll-llm.yml` (runs `poll --once --llm`). It's
   manual-only by default — add the `ANTHROPIC_API_KEY` secret, then

@@ -1,0 +1,7 @@
+# Supabase project config (only what this repo needs).
+project_id = "tqkwztozcoyekpacwqnq"
+
+# The pinger authenticates with its own x-dispatch-secret header instead of a
+# Supabase JWT, so pg_cron can call it without embedding the anon key in SQL.
+[functions.poll-dispatch]
+verify_jwt = false
