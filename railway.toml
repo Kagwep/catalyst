@@ -10,7 +10,10 @@ builder = "dockerfile"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "uv run catalyst croo-provider"
+# Narration on Sonnet (consistent with the poller's enrichment; cheaper than the
+# opus default). Drop --present-model to use opus, or unset ANTHROPIC_API_KEY to
+# disable narration entirely (delivery still works, deterministic).
+startCommand = "uv run catalyst croo-provider --present-model claude-sonnet-5"
 numReplicas = 1
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10
