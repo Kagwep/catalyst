@@ -52,6 +52,31 @@ def _parse_dt(s: str | None) -> datetime | None:
         return None
 
 
+def apply_confidence_calibration(conf: float, table) -> float:
+    """Map a raw confidence through a monotone piecewise-linear correction.
+
+    `table` is a list of `[stated, realized]` points (as emitted by the Phase-8b
+    tuner from the backtest's reliability buckets), so a delivered `confidence`
+    *means* its historical realized win-rate. Points are assumed sorted and
+    monotone in `stated`; queries outside the range clamp flat to the nearest
+    endpoint. Absent/empty table → the confidence is returned unchanged. Always
+    clamped to [0, 1]."""
+    if not table:
+        return conf
+    pts = sorted((float(x), float(y)) for x, y in table)
+    if conf <= pts[0][0]:
+        out = pts[0][1]
+    elif conf >= pts[-1][0]:
+        out = pts[-1][1]
+    else:
+        out = pts[-1][1]
+        for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+            if x0 <= conf <= x1:
+                out = y0 if x1 == x0 else y0 + (y1 - y0) * (conf - x0) / (x1 - x0)
+                break
+    return max(0.0, min(1.0, out))
+
+
 def _rationale(
     sig: Signal, act: str, fresh_min: float | None, stale: bool,
     layer_notes: list[str], conflict: bool = False,
@@ -104,6 +129,7 @@ def plan(
     trend_weight: float = 0.25,
     swing_trend_threshold: float = 0.2,
     swing_max_age_minutes: float | None = None,
+    confidence_calibration=None,
 ) -> list[Action]:
     """Propose actions from ranked signals, sorted by confidence.
 
@@ -244,6 +270,11 @@ def plan(
             act = "watch"
             conflict = True
 
+        # Confidence calibration (Phase-8b): remap the raw confidence through the
+        # tuner's fitted stated→realized curve so a delivered 0.7 has historically
+        # won ~70%. Applied last, on the post-modifier confidence; absent → no-op.
+        if confidence_calibration:
+            confidence = apply_confidence_calibration(confidence, confidence_calibration)
         confidence = round(confidence, 3)
         if confidence < min_confidence:
             continue

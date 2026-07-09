@@ -152,3 +152,34 @@ def test_actions_persist_and_feed_cooldown(tmp_path):
         assert plan([sig("BTC", 0.5)], now=NOW, recent_actions=recent, cooldown_minutes=120) == []
     finally:
         conn.close()
+
+
+# ---- Phase 8b: confidence calibration ---------------------------------------
+
+def test_confidence_calibration_remaps_final_confidence():
+    from catalyst.planner import apply_confidence_calibration
+
+    # A stated→realized table that says "our 0.8-ish confidences really win ~0.5".
+    table = [[0.4, 0.4], [0.8, 0.5]]
+    raw = plan([sig("BTC", 0.6, strength=0.8)], now=NOW)[0]
+    cal = plan([sig("BTC", 0.6, strength=0.8)], now=NOW, confidence_calibration=table)[0]
+    assert cal.confidence != raw.confidence
+    # It equals the piecewise-linear map applied to the raw (pre-round) confidence.
+    assert abs(cal.confidence - round(apply_confidence_calibration(raw.confidence, table), 3)) < 1e-6
+    assert 0.0 <= cal.confidence <= 1.0
+
+
+def test_confidence_calibration_absent_is_noop():
+    raw = plan([sig("BTC", 0.6, strength=0.8)], now=NOW)[0]
+    same = plan([sig("BTC", 0.6, strength=0.8)], now=NOW, confidence_calibration=None)[0]
+    assert raw.confidence == same.confidence
+
+
+def test_apply_confidence_calibration_clamps_and_interpolates():
+    from catalyst.planner import apply_confidence_calibration
+
+    table = [[0.2, 0.1], [0.6, 0.5], [0.9, 0.95]]
+    assert apply_confidence_calibration(0.0, table) == 0.1     # below range → first realized
+    assert apply_confidence_calibration(1.0, table) == 0.95    # above range → last realized
+    mid = apply_confidence_calibration(0.4, table)             # halfway 0.2→0.6 → halfway 0.1→0.5
+    assert abs(mid - 0.3) < 1e-9

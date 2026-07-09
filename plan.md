@@ -617,6 +617,68 @@ the local poller (7a) has banked ~1 week of `bias_snapshots`, calibrate:
 
 ---
 
+## Phase 8 — Scoring engine (fitted weights, not guessed constants)
+
+**Goal:** turn the scorer from a fixed formula with hand-set constants into an
+engine: the same deterministic score path, plus a tuning loop that *owns* the
+constants and a feedback loop that learns them from realized outcomes.
+
+**Why:** every weight today is a guess — `CATALYST_WEIGHTS` (`hack: 2.0, etf: 1.8…`),
+source weights, the single 6h half-life, the 0.2 buy threshold. The backtest
+*measures* hit-rate and calibration error but nothing feeds that back. The scorer
+also counts posts rather than stories (10 outlets covering one ETF approval score
+as 10 independent events), and ignores the enrichment fields added 2026-07-08:
+`severity` (the LLM's direct "how market-moving" judgment) and `event` (the story
+key that enables dedup) currently influence the score **zero**.
+
+Design principle: **the engine isn't a smarter formula — it's the formula plus a
+tuning loop.** `weights.json` (already wired via `load_weights` / `--weights` /
+`signal_kwargs`) graduates from a hand-edited file to a fitted, versioned artifact
+the backtest produces.
+
+### 8a. Use what we already store (buildable NOW — immediate quality win)
+- **Severity weighting:** multiply each post's contribution in `compute_signals`
+  by its `severity` (start `high ≈ 2.0, medium ≈ 1.2, low ≈ 0.7, none ≈ 0.3`;
+  lexicon rows have `severity NULL` → treat as 1.0 so the path degrades cleanly).
+  Put the map in `weights.json` so 8b can fit it.
+- **Story dedup via `event`:** cluster posts by (asset, catalyst, similar `event`
+  text) within the window → one story = one vote; extra outlets become a log-scale
+  *confirmation* bonus instead of linear volume. Kills repost/syndication inflation.
+- **Per-catalyst decay:** replace the single `halflife_hours=6` with a per-catalyst
+  map (hack reprices in hours; regulation over days). Also in `weights.json`.
+- **Done-check:** unit tests for each; run the backtest before/after on the banked
+  window — severity+dedup should not *degrade* hit-rate/calibration (small sample,
+  so treat as a regression gate, not proof of improvement).
+
+### 8b. The tuner (buildable NOW — gets good with ~4–8 weeks of history)
+- `catalyst tune`: random/grid search over `weights.json` parameters (catalyst
+  weights, severity map, decay map, source weights, thresholds) → `run_backtest`
+  per candidate → rank by hit-rate + `calibration_error` → emit
+  `weights.tuned.json` with the measured scores attached. All machinery exists
+  (`signal_kwargs`, `plan_kwargs`, `metrics.reliability`).
+- **Confidence calibration:** fit a monotone correction from the backtest's
+  reliability buckets (stated 0.7 vs realized win rate) and apply it at plan time —
+  so a delivered `confidence: 0.7` *means* ~70%. A real selling point for the
+  Croo services.
+- **Done-check:** `catalyst tune --window 30d` runs end-to-end on the banked store,
+  emits a candidate file, and `--weights weights.tuned.json` reproduces the
+  reported metrics exactly (determinism check).
+
+### 8c. Learned weights from outcomes (GATED — needs months of banked history)
+- Outcomes table: for every stored event/action, record realized 4h/24h/72h
+  forward returns of its assets (`PriceOracle` + the point-in-time store).
+- Per-catalyst / per-severity / per-source **measured impact** replaces the priors:
+  `CATALYST_WEIGHTS`, the severity map, and source trust become data, refreshed on
+  a schedule (the LEARN loop). Same data gate as the future backtest-as-a-service.
+- **Done-check:** learned weights beat the 8b-tuned priors on a held-out window.
+
+### 8d. Build order
+8a first (pure quality win on today's data, no new data needed) → 8b skeleton
+immediately after (so every day the hosted poller banks makes the weights better
+automatically — the engine grows into itself) → 8c when the store has depth.
+
+---
+
 ## Sequencing & how to pick up work
 
 1. Phases are ordered by dependency: **1 → 2 → 3 → 4 → 5**, with **6 gated** and
@@ -624,7 +686,9 @@ the local poller (7a) has banked ~1 week of `bias_snapshots`, calibrate:
    start once those land. Source/planner work, 1–2, is independent of the platform.
    **Phase 7** — trend/multi-day horizon — reuses the existing `bias_snapshots`
    history: 7b/7c are buildable now against fixtures; 7a (hosted continuous poll +
-   shared store) is what makes them *real*.)
+   shared store) is what makes them *real*. **Phase 8** — scoring engine — 8a/8b
+   are buildable now; 8b's tuned output and 8c are history-gated, sharing the same
+   data-accumulation gate as 7e and the future backtest-as-a-service.)
 2. Within a phase, do the lettered items in order; each has its own done-check.
 3. Before starting, run `pytest -q` to confirm a green baseline.
 4. After each item: add/extend its test, run `pytest -q`, and (for source/planner
@@ -650,3 +714,4 @@ the local poller (7a) has banked ~1 week of `bias_snapshots`, calibrate:
 | **New: execution** | `catalyst/execution.py` (Phase 6, gated) |
 | **New: trend layer** | `catalyst/trend.py` (Phase 7) — reads `bias_snapshots`, feeds `planner` modifiers |
 | Bias history | `store.py` (`save_bias_snapshots` ~248, `fetch_bias_snapshots` ~274) |
+| **New: scoring engine** | Phase 8 — 8a lands in `signals.py` + `weights.json`; 8b adds a `tune` command (`cli.py` + `backtest.py`); 8c adds an outcomes table (`store.py`) |

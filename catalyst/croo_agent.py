@@ -80,7 +80,7 @@ def default_pipeline(
         requirements_window_hours, select_actions,
     )
     from .planner import plan
-    from .signals import compute_signals
+    from .signals import compute_signals, signal_kwargs_from_weights
     from .store import (
         fetch_derivs, fetch_enriched, fetch_flows, fetch_macro, fetch_onchain, open_store,
     )
@@ -90,10 +90,22 @@ def default_pipeline(
     # the default 24h. Trend keeps its own multi-day window (bias-slope context).
     window_hours = requirements_window_hours(requirements) or DEFAULT_WINDOW_HOURS
 
+    # Honour a tuned weights artifact end-to-end: the same Phase-8 knobs the CLI
+    # applies (signal weights + planner modifier weights, buy_threshold, and the
+    # confidence calibration table) so paid delivery uses the fitted scorer, not
+    # the raw defaults. Absent `weights` → every override is empty → unchanged.
+    weights = weights or {}
+    signal_kwargs = signal_kwargs_from_weights(weights)
+    plan_kwargs = dict(weights.get("modifier_weights") or {})
+    if weights.get("buy_threshold") is not None:
+        plan_kwargs["buy_threshold"] = weights["buy_threshold"]
+    if weights.get("confidence_calibration"):
+        plan_kwargs["confidence_calibration"] = weights["confidence_calibration"]
+
     conn = open_store(db_path)
     try:
         enriched = fetch_enriched(conn)
-        sigs = compute_signals(enriched, window_hours=window_hours)
+        sigs = compute_signals(enriched, window_hours=window_hours, **signal_kwargs)
         actions = plan(
             sigs,
             regime=compute_regime(fetch_macro(conn)),
@@ -101,6 +113,7 @@ def default_pipeline(
             supply_bias=compute_supply_bias(fetch_onchain(conn)),
             derivs_bias=compute_derivs_bias(fetch_derivs(conn)),
             trend_bias=compute_trend_bias(conn, [s.asset for s in sigs]),
+            **plan_kwargs,
         )
     finally:
         conn.close()

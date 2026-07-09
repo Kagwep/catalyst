@@ -66,14 +66,33 @@ def parse_interval(text: str) -> float:
 
 
 def _signal_weight_kwargs(weights_path: str | None) -> dict:
-    """Build compute_signals weighting overrides from an optional weights file."""
+    """Build compute_signals weighting overrides from an optional weights file.
+
+    Includes the Phase-8a knobs (severity_weights, catalyst_halflives) — the key
+    surface lives in `signals.signal_kwargs_from_weights` so it's defined once."""
     if not weights_path:
         return {}
+    from .signals import load_weights, signal_kwargs_from_weights
+
+    return signal_kwargs_from_weights(load_weights(weights_path))
+
+
+def _buy_threshold_override(weights_path: str | None):
+    """A tuner-fitted `buy_threshold` from the weights file, if present (else None)."""
+    if not weights_path:
+        return None
     from .signals import load_weights
 
-    w = load_weights(weights_path)
-    keys = ("source_weights", "catalyst_weights", "primary_boost", "strength_saturation")
-    return {k: w[k] for k in keys if k in w}
+    return load_weights(weights_path).get("buy_threshold")
+
+
+def _confidence_calibration(weights_path: str | None):
+    """The Phase-8b `confidence_calibration` stated→realized table, if the file has one."""
+    if not weights_path:
+        return None
+    from .signals import load_weights
+
+    return load_weights(weights_path).get("confidence_calibration")
 
 
 def _flow_scale(weights_path: str | None) -> dict | None:
@@ -264,13 +283,17 @@ def _poll_cycle(conn, args, primary, llm_score):
         trend_bias = compute_trend_bias(conn, [s.asset for s in sigs])
         recent = fetch_recent_actions(conn, within_minutes=args.cooldown)
         mods = _modifier_weights(getattr(args, "weights", None), args)
+        wpath = getattr(args, "weights", None)
         actions = run_plan(
-            sigs, buy_threshold=args.buy_threshold, max_age_minutes=args.max_age,
+            sigs,
+            buy_threshold=_buy_threshold_override(wpath) or args.buy_threshold,
+            max_age_minutes=args.max_age,
             fast_max_age_minutes=getattr(args, "fast_max_age", None),
             swing_max_age_minutes=getattr(args, "swing_max_age", None),
             recent_actions=recent, cooldown_minutes=args.cooldown,
             regime=regime, flow_bias=flow_bias, supply_bias=supply_bias,
-            market_bias=market_bias, derivs_bias=derivs_bias, trend_bias=trend_bias, **mods,
+            market_bias=market_bias, derivs_bias=derivs_bias, trend_bias=trend_bias,
+            confidence_calibration=_confidence_calibration(wpath), **mods,
         )
         save_actions(conn, actions)
         notable = [a for a in actions if a.action in ("buy", "sell")]
@@ -663,6 +686,23 @@ def build_parser() -> argparse.ArgumentParser:
     cal.add_argument("--rounds", type=int, default=2, help="coordinate-ascent passes")
     cal.add_argument("--write", help="weights.json to write the tuned modifier_weights into")
 
+    tun = sub.add_parser(
+        "tune", parents=[common],
+        help="Phase-8b: random-search the scorer's weights over the backtest and emit "
+             "a self-describing weights.tuned.json (fitted params + measured metrics)",
+    )
+    tun.add_argument("--from", dest="start", help="start date YYYY-MM-DD (default: --window before --to)")
+    tun.add_argument("--to", dest="end", help="end date YYYY-MM-DD (default: today)")
+    tun.add_argument("--window", type=float, default=30.0, help="lookback in days if --from is omitted")
+    tun.add_argument("--step-hours", type=float, default=24.0, help="replay cadence")
+    tun.add_argument("--trials", type=int, default=25, help="candidate weight sets to try")
+    tun.add_argument("--seed", type=int, default=0, help="RNG seed (same seed+window → same output)")
+    tun.add_argument("--min-trades", type=int, default=5,
+                     help="disqualify candidates scoring fewer trades (avoids degenerate winners)")
+    tun.add_argument("--calibration-penalty", type=float, default=0.5,
+                     help="objective = hit_rate − penalty × calibration_error")
+    tun.add_argument("--out", default="weights.tuned.json", help="output artifact path")
+
     dll = sub.add_parser(
         "defillama", parents=[common], help="protocol signals: hacks, TVL moves, new listings"
     )
@@ -938,7 +978,7 @@ def main(argv: list[str] | None = None) -> int:
             mods = _modifier_weights(args.weights, args)
             actions = run_plan(
                 sigs,
-                buy_threshold=args.buy_threshold,
+                buy_threshold=_buy_threshold_override(args.weights) or args.buy_threshold,
                 watch_threshold=args.watch_threshold,
                 min_confidence=args.min_confidence,
                 max_age_minutes=args.max_age,
@@ -952,6 +992,7 @@ def main(argv: list[str] | None = None) -> int:
                 market_bias=market_bias,
                 derivs_bias=derivs_bias,
                 trend_bias=trend_bias,
+                confidence_calibration=_confidence_calibration(args.weights),
                 **mods,
             )
             actions = actions[: args.limit]
@@ -1075,7 +1116,10 @@ def main(argv: list[str] | None = None) -> int:
                 supply_kwargs=_supply_kwargs(args.weights),
                 market_kwargs=_market_kwargs(args.weights),
                 derivs_kwargs=_derivs_kwargs(args.weights),
-                plan_kwargs={"buy_threshold": args.buy_threshold, "cooldown_minutes": args.cooldown},
+                plan_kwargs={
+                    "buy_threshold": _buy_threshold_override(args.weights) or args.buy_threshold,
+                    "cooldown_minutes": args.cooldown,
+                },
                 portfolio_cfg=(
                     {"base_size": args.base_size, "max_position": args.max_position,
                      "cost_bps": args.cost_bps} if args.portfolio else None
@@ -1133,6 +1177,35 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"\nbest {args.metric}={result['score']} over {result['trials']} trials: "
             f"{result['modifier_weights']}", file=sys.stderr,
+        )
+        return 0
+
+    if args.cmd == "tune":
+        from datetime import timedelta
+
+        from .tune import run_tune
+
+        def _date(s):
+            return datetime.fromisoformat(s).replace(tzinfo=timezone.utc) if s else None
+
+        end = _date(args.end) or datetime.now(timezone.utc)
+        start = _date(args.start) or (end - timedelta(days=args.window))
+        conn = open_store(args.db)
+        try:
+            tuned = run_tune(
+                conn, start=start, end=end, step_hours=args.step_hours,
+                trials=args.trials, seed=args.seed, min_trades=args.min_trades,
+                calibration_penalty=args.calibration_penalty, out=args.out,
+            )
+        finally:
+            conn.close()
+        json.dump(tuned, sys.stdout, indent=2, default=str)
+        sys.stdout.write("\n")
+        m = tuned["_tuning"]
+        print(
+            f"\ntuned over {m['trials']} trials (seed {m['seed']}): hit-rate {m['hit_rate']}, "
+            f"calibration-error {m['calibration_error']}, {m['n_trades']} trades "
+            f"→ wrote {args.out}", file=sys.stderr,
         )
         return 0
 

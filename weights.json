@@ -47,5 +47,25 @@
     "timelock": 1.2,
     "governance": 1.3,
     "partnership": 1.2
+  },
+
+  "_severity_comment": "Phase-8a: per-post multiplier from the LLM's severity judgment (how market-moving). Lexicon rows have severity NULL → treated as 1.0 (not listed here); an explicit 'none' damps hard.",
+  "severity_weights": {
+    "high": 2.0,
+    "medium": 1.2,
+    "low": 0.7,
+    "none": 0.3
+  },
+
+  "_halflife_comment": "Phase-8a: per-catalyst time-decay half-life in HOURS (a hack reprices in hours, regulation over days). Unlisted catalysts fall back to the single halflife_hours arg (default 6).",
+  "catalyst_halflives": {
+    "hack": 2.0,
+    "liquidation": 2.0,
+    "listing": 4.0,
+    "etf": 12.0,
+    "regulation": 24.0,
+    "macro": 12.0,
+    "partnership": 8.0,
+    "mainnet": 8.0
   }
 }
