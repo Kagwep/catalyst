@@ -6,9 +6,11 @@ name: poll
 # cycle number continues across runs (stored in Postgres), so the sequence is
 # stable and monotonic.
 #
-# Enrichment: MANDATORY LLM interpretation on Sonnet (--llm-all). Every new post
-# with text is scored by claude-sonnet-5 — the lexicon can't read nuance and the
-# posts are the catalyst/sentiment source. Requires the ANTHROPIC_API_KEY secret.
+# Enrichment: MANDATORY LLM interpretation on Haiku (--llm-all). Every new NEWS
+# post is scored by claude-haiku-4-5 (enum classification + a 12-word extraction —
+# Haiku's lane; A/B'd 11/12 direction agreement vs Sonnet at ~1/3 the cost).
+# Data-feed posts (derivs snapshots etc.) stay on the free lexicon — nothing
+# downstream reads their LLM fields. Requires the ANTHROPIC_API_KEY secret.
 #
 # Public repo => unlimited Actions minutes, so the cadence below is free.
 
@@ -65,7 +67,7 @@ jobs:
       - name: Sync dependencies (Postgres backend + LLM)
         run: uv sync --extra pg --extra llm
 
-      - name: Run one poll cycle (mandatory Sonnet enrichment)
-        # --llm-all: every new post with text is LLM-interpreted on Sonnet (posts
-        # are the catalyst/sentiment source). Add --fred for FRED macro series.
-        run: uv run catalyst poll --once --llm-all --model claude-sonnet-5
+      - name: Run one poll cycle (mandatory Haiku enrichment, news-only)
+        # --llm-all: every new NEWS post is LLM-interpreted on Haiku; data-feed
+        # posts stay lexicon. Add --fred for FRED macro series.
+        run: uv run catalyst poll --once --llm-all --model claude-haiku-4-5

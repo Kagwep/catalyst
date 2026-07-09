@@ -53,8 +53,7 @@ jobs:
       - name: Sync dependencies (Postgres backend + LLM)
         run: uv sync --extra pg --extra llm
 
-      - name: Run one poll cycle with mandatory LLM enrichment (Sonnet)
-        # --llm-all: every new post with text is LLM-interpreted (posts are the
-        # catalyst/sentiment source; the lexicon can't read nuance). Only new
-        # posts are scored per cycle, so Sonnet volume stays modest.
-        run: uv run catalyst poll --once --llm-all --model claude-sonnet-5
+      - name: Run one poll cycle with mandatory LLM enrichment (Haiku, news-only)
+        # --llm-all: every new NEWS post is LLM-interpreted; data-feed posts stay
+        # lexicon. Only new posts are scored per cycle, so volume stays modest.
+        run: uv run catalyst poll --once --llm-all --model claude-haiku-4-5

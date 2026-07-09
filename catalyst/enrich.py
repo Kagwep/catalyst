@@ -155,8 +155,9 @@ def hybrid_enrich(
     primary_handles: frozenset[str] = frozenset(),
     score_threshold: float = 0.3,
     llm_all: bool = False,
+    llm_sources: frozenset[str] | None = None,
 ) -> list[tuple[str, Enrichment]]:
-    """Score items (dicts with uri/text/author_handle). Returns (uri, Enrichment) pairs.
+    """Score items (dicts with uri/text/source/author_handle). Returns (uri, Enrichment) pairs.
 
     Every item gets a lexicon score; an LLM score is layered on top when
     `llm_score` is provided. By default only *candidates* get the LLM call (cost
@@ -165,6 +166,12 @@ def hybrid_enrich(
     the catalyst-bearing sentiment source, so their interpretation shouldn't be
     gated. Only new posts are enriched per cycle, so the call volume stays small.
     LLM failures fall back to the lexicon result, per item.
+
+    `llm_sources` gates the LLM by post source (None = no gate): the numeric data
+    feeds (derivs OI snapshots, TVL, …) also arrive as posts, but they're excluded
+    from both the sentiment signal and the events feed (`store.NEWS_SOURCES`), so
+    LLM-scoring them is pure spend — the CLI passes the news sources here. Gated
+    posts still get the lexicon score (so they're marked enriched and not re-fetched).
     """
     lex = LexiconScorer()
     out: list[tuple[str, Enrichment]] = []
@@ -178,6 +185,8 @@ def hybrid_enrich(
         use_llm = bool(llm_score) and bool(text.strip()) and (
             llm_all or is_candidate(e, is_primary=primary, threshold=score_threshold)
         )
+        if use_llm and llm_sources is not None and it.get("source") not in llm_sources:
+            use_llm = False           # data-feed post: nothing downstream reads its LLM fields
         if use_llm:
             try:
                 e = llm_score(text)
@@ -204,11 +213,13 @@ _SYSTEM = (
 )
 
 
-def make_anthropic_scorer(model: str = "claude-opus-4-8", client=None) -> Callable[[str], Enrichment]:
+def make_anthropic_scorer(model: str = "claude-haiku-4-5", client=None) -> Callable[[str], Enrichment]:
     """Build an LLM scorer backed by Claude (requires the [llm] extra + API key).
 
-    The model defaults to claude-opus-4-8; pass model="claude-haiku-4-5" for a
-    fast, low-cost pass on a high-volume firehose.
+    Defaults to claude-haiku-4-5: enrichment is enum classification + a ≤12-word
+    extraction — Haiku's lane — and it runs on every news post, so the default is
+    the cost-safe one (A/B'd 2026-07-09: 11/12 direction agreement vs Sonnet).
+    Pass a bigger model to trade cost for marginal severity nuance.
     """
     from pydantic import BaseModel
 

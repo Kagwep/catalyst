@@ -107,7 +107,7 @@ the feed (supported) — never array-of-objects.
 
 | Sub-field   | Type   | Description |
 | ----------- | ------ | ----------- |
-| `asset`     | string | Ticker, or `MACRO` for market-wide |
+| `asset`     | string | Ticker, or `MARKET` for market-wide |
 | `catalyst`  | string | Catalyst category |
 | `event`     | string | One-line "what happened" |
 | `direction` | string | bullish / bearish / neutral |

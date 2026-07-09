@@ -102,7 +102,7 @@ def facts_from_payload(flat: dict, headlines=None) -> dict:
 
 
 def make_anthropic_presenter(
-    model: str = "claude-opus-4-8", client=None
+    model: str = "claude-sonnet-5", client=None
 ) -> Callable[[dict], dict]:
     """Build a grounded presenter backed by Claude (needs the [llm] extra + key).
 

@@ -248,9 +248,15 @@ def _poll_cycle(conn, args, primary, llm_score):
     parts = [f"{r['inserted']} new"]
 
     if args.enrich:
+        from .store import NEWS_SOURCES
+
         results = hybrid_enrich(
             fetch_unenriched(conn), llm_score=llm_score, primary_handles=primary,
             llm_all=getattr(args, "llm_all", False),
+            # LLM only reads news posts — data-feed rows (derivs snapshots, TVL…)
+            # are excluded from sentiment AND the events feed, so LLM-scoring them
+            # is pure spend; they keep the free lexicon score.
+            llm_sources=frozenset(NEWS_SOURCES),
         )
         health.enriched = save_enrichments(conn, results)
         health.llm_calls = sum(1 for _, e in results if e.model != "lexicon")
@@ -733,8 +739,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="disable the grounded LLM narration even if ANTHROPIC_API_KEY is set "
              "(narration only restates computed numbers; it's on by default when a key exists).",
     )
-    croo.add_argument("--present-model", default="claude-opus-4-8",
-                      help="model for the narration layer (e.g. claude-haiku-4-5 for cheaper)")
+    croo.add_argument("--present-model", default="claude-sonnet-5",
+                      help="model for the narration layer (buyer-facing prose; one call per paid order)")
 
     poll = sub.add_parser(
         "poll", parents=[common],
@@ -748,8 +754,9 @@ def build_parser() -> argparse.ArgumentParser:
     poll.add_argument("--plan", action=argparse.BooleanOptionalAction, default=True)
     poll.add_argument("--llm", action="store_true", help="LLM-score candidates during enrich")
     poll.add_argument("--llm-all", action="store_true",
-                      help="MANDATORY LLM scoring of every post with text (bypass candidate gate). Implies --llm.")
-    poll.add_argument("--model", default="claude-opus-4-8")
+                      help="MANDATORY LLM scoring of every NEWS post with text (bypass candidate gate; "
+                           "data-feed posts stay lexicon). Implies --llm.")
+    poll.add_argument("--model", default="claude-haiku-4-5")
     poll.add_argument("--primary", default="watcher.guru")
     poll.add_argument("--window", type=float, default=24.0)
     poll.add_argument("--halflife", type=float, default=6.0)
@@ -876,9 +883,9 @@ def build_parser() -> argparse.ArgumentParser:
     en.add_argument("--source")
     en.add_argument("--llm", action="store_true", help="LLM-score candidates (needs [llm] extra + API key)")
     en.add_argument("--llm-all", action="store_true",
-                    help="MANDATORY LLM scoring of every post with text (bypass the candidate "
-                         "gate; posts are the catalyst/sentiment source). Implies --llm.")
-    en.add_argument("--model", default="claude-opus-4-8", help="LLM model (e.g. claude-haiku-4-5)")
+                    help="MANDATORY LLM scoring of every NEWS post with text (bypass the candidate "
+                         "gate; data-feed posts stay lexicon). Implies --llm.")
+    en.add_argument("--model", default="claude-haiku-4-5", help="LLM model (e.g. claude-sonnet-5 for more nuance)")
     en.add_argument("--primary", default="watcher.guru", help="comma-separated high-signal handles")
     en.add_argument("--reenrich", action="store_true", help="re-score already-scored posts")
 
@@ -1280,8 +1287,13 @@ def main(argv: list[str] | None = None) -> int:
             primary = frozenset(
                 h.strip().lstrip("@") for h in (args.primary or "").split(",") if h.strip()
             )
+            from .store import NEWS_SOURCES
+
+            # Same news-only LLM gate as the poll loop (an explicit --source
+            # still narrows the *fetch*; this only stops LLM spend on data feeds).
             results = hybrid_enrich(items, llm_score=llm_score, primary_handles=primary,
-                                    llm_all=args.llm_all)
+                                    llm_all=args.llm_all,
+                                    llm_sources=frozenset(NEWS_SOURCES))
             n = save_enrichments(conn, results)
         finally:
             conn.close()

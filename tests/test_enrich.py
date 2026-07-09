@@ -63,6 +63,33 @@ def test_hybrid_routes_only_candidates_to_llm():
     assert len(calls) == 2
 
 
+def test_hybrid_llm_sources_gates_data_feeds():
+    """`llm_sources` stops LLM spend on data-feed posts: even under llm_all, a
+    derivs snapshot stays lexicon (nothing downstream reads its LLM fields),
+    while news posts get the LLM. NULL gate (None) = old behavior, no gate."""
+    sentinel = Enrichment(0.9, "positive", ["BTC"], "etf", model="stub-llm")
+    calls = []
+
+    def stub(text):
+        calls.append(text)
+        return sentinel
+
+    items = [
+        {"uri": "n", "text": "Bitcoin ETF approved", "source": "bluesky", "author_handle": "x"},
+        {"uri": "d", "text": "[DERIVS] BTCUSDT open interest $121M", "source": "derivs", "author_handle": "x"},
+    ]
+    out = dict(hybrid_enrich(items, llm_score=stub, llm_all=True,
+                             llm_sources=frozenset({"bluesky", "rss", "github"})))
+    assert out["n"].model == "stub-llm"    # news post → LLM
+    assert out["d"].model == "lexicon"     # data feed → gated, free lexicon only
+    assert len(calls) == 1
+
+    # No gate (None) keeps the old behavior: llm_all scores both.
+    calls.clear()
+    out = dict(hybrid_enrich(items, llm_score=stub, llm_all=True, llm_sources=None))
+    assert out["d"].model == "stub-llm" and len(calls) == 2
+
+
 def test_hybrid_llm_failure_falls_back_to_lexicon():
     def boom(text):
         raise RuntimeError("api down")
