@@ -10,7 +10,7 @@
 #   llm — OPTIONAL enrichment path. Installed so it *can* run, but it stays OFF
 #         at runtime unless you invoke enrichment AND set ANTHROPIC_API_KEY.
 #         The provider itself never enriches; this only matters if you also run
-#         `catalyst poll ... --llm` from this same image (see DEPLOY-PROVIDER.md).
+#         `catalyst poll ... --llm` from this same image.
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
 WORKDIR /app

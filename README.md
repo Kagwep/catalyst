@@ -54,9 +54,8 @@ an unhealthy/stale pipeline are rejected at the gate before any charge.
 | **catalyst signals** | `catalyst.signals` v2.0 | `784122a0-b943-4b95-8d66-f7c7896e7eba` | The depth product — "the call" |
 | **catalyst events** | `catalyst.events` v2.0 | `6669e91c-c617-4fea-938a-8b6bcc30038e` | The breadth product — "the radar" |
 
-Full field-by-field schemas (and the Croo Dashboard registration notes) live in
-**[DASHBOARD-SCHEMA.md](DASHBOARD-SCHEMA.md)** — the single source of truth.
-Summaries below.
+Full field-by-field output schemas live in
+**[DASHBOARD-SCHEMA.md](DASHBOARD-SCHEMA.md)**. Summaries below.
 
 #### catalyst signals — the depth product ("the call")
 
@@ -260,8 +259,8 @@ All optional — everything runs keyless and offline by default.
 | Var | Purpose |
 |---|---|
 | `ANTHROPIC_API_KEY` | Enables the Claude enrichment pass (`--llm`) and the provider's grounded narration |
-| `DATABASE_URL` / `DATABASE_PASSWORD` | Switch the store from local SQLite to hosted Postgres (Supabase). See [HOSTING.md](HOSTING.md) |
-| `CROO_API_URL` / `CROO_WS_URL` / `CROO_SDK_KEY` | Run as a Croo provider. See [DEPLOY-PROVIDER.md](DEPLOY-PROVIDER.md) |
+| `DATABASE_URL` / `DATABASE_PASSWORD` | Switch the store from local SQLite to hosted Postgres |
+| `CROO_API_URL` / `CROO_WS_URL` / `CROO_SDK_KEY` | Run as a Croo provider |
 | `CROO_EVENTS_SERVICE_ID` | Set to also serve the second (`catalyst.events`) service off the same provider |
 | `BLUESKY_HANDLE` / `BLUESKY_APP_PASSWORD` | Authenticated Bluesky search (the public AppView 403s datacenter IPs; auth isn't IP-blocked) |
 | `FRED_API_KEY` | Optional numeric macro series (`macro --fred`) |
@@ -349,34 +348,6 @@ uv run pytest
 The suite is **fully offline** — the Croo SDK is mocked and adapters are stubbed
 (`respx`), so nothing hits the network. One live-sandbox Croo test is skipped
 without credentials.
-
----
-
-## Hosting topology
-
-Two pieces run in two different places against **one shared database**:
-
-```
-INGESTION POLLER                          PROVIDER AGENT
-GitHub Actions (cron, ~15 min)            always-on box (Railway)
-  catalyst poll --once                      catalyst croo-provider
-  + Supabase pg_cron pinger (exact 15m)     holds the Croo WebSocket
-        │                                          │
-        └──────────►  Supabase Postgres  ◄─────────┘
-                      (DATABASE_URL)
-```
-
-The poller ingests + enriches on a cron and can't hold a socket, so it runs on
-GitHub Actions (with a Supabase `pg_cron` → Edge Function pinger for an exact
-cadence, since GitHub's cron is best-effort). The provider holds a persistent
-Croo WebSocket, so it needs an always-on host (Railway), and it's **read-only**
-against the same DB. Step-by-step:
-
-- **[HOSTING.md](HOSTING.md)** — the poller on Supabase + GitHub Actions.
-- **[DEPLOY-PROVIDER.md](DEPLOY-PROVIDER.md)** — the provider agent on Railway.
-
-Local dev needs none of this: with `DATABASE_URL` unset you're on local SQLite
-(`catalyst.db`).
 
 ---
 

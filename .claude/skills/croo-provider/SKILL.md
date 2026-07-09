@@ -63,7 +63,7 @@ stream.on(EventType.ORDER_COMPLETED,     mark_done)
 
 The runtime is a long-lived loop — it is the natural home for the **same poll
 engine** Catalyst already runs (`catalyst/cli.py:_poll_cycle`). Two integration
-shapes, pick per `plan.md`:
+shapes, pick per your build plan:
 1. **On-demand (order-driven):** run the pipeline *when an order is paid*, deliver
    that order's fresh result. Lowest latency to revenue, pay-per-call.
 2. **Standing (subscription-like):** keep polling on an interval; when an order
@@ -102,7 +102,7 @@ This reuses the Phase 4 health surface directly.
 
 ## Where this lands in the project plan
 
-This skill is the platform layer that the rest of `plan.md` must target:
+This skill is the platform layer that the rest of the project must target:
 
 - **Phase 3 (Alerts)** generalizes: a Croo **delivery** is just another `Sink` —
   instead of (or in addition to) webhook/Telegram, a sink fulfills a paid order

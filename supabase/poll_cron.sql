@@ -1,6 +1,6 @@
 -- Exact 15-minute poll cadence: pg_cron → poll-dispatch Edge Function →
 -- GitHub workflow_dispatch. Run this in the Supabase SQL editor AFTER the
--- function is deployed and its secrets are set (see HOSTING.md §5).
+-- function is deployed and its secrets are set.
 --
 -- Replace <DISPATCH_SECRET> below with the same value you stored as the
 -- function's DISPATCH_SECRET secret.
