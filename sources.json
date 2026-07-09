@@ -1,6 +1,10 @@
 {
-  "accounts_file": "news-crypto-blue-sky.txt",
-  "accounts_max": 25,
+  "accounts": [
+    { "actor": "watcher.guru", "max": 25 },
+    { "actor": "nytimes.com", "max": 25 },
+    { "actor": "cnn.com", "max": 25 },
+    { "actor": "reuters.com", "max": 25 }
+  ],
   "accounts_max_age_hours": 24,
 
   "keywords": [

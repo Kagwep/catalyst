@@ -1,4 +1,0 @@
-@watcher.guru
-@nytimes.com
-@cnn.com
-@reuters.com
