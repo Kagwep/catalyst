@@ -434,7 +434,39 @@ class CrooProvider:
                     self.db_path, sorted(self.covered_assets) if self.covered_assets else "all")
         return self._stream
 
+    # Seconds between stream-health checks, and how many consecutive checks with
+    # zero live SDK tasks count as dead (a real in-flight reconnect repopulates
+    # the tasks within one backoff window, ~30s).
+    WATCHDOG_INTERVAL = 15.0
+    WATCHDOG_DEAD_CHECKS = 3
+
     async def run(self) -> None:
-        """Connect and register handlers, then idle until cancelled."""
-        await self.start()
-        await asyncio.Event().wait()
+        """Connect and register handlers, then watch the stream until it dies.
+
+        The SDK never surfaces a dead websocket to the caller: a duplicate-key
+        close (1008) sets `stream.err()` and stops reading without reconnecting,
+        and a failed reconnect can leave every stream task finished with no
+        error recorded at all. Idling on a bare Event() after either of those
+        leaves the process "online" to the host but deaf to Croo forever — so
+        poll for both and raise, letting the process exit non-zero and the host
+        (e.g. Railway) restart it with a fresh connection.
+        """
+        stream = await self.start()
+        dead_checks = 0
+        while True:
+            await asyncio.sleep(self.WATCHDOG_INTERVAL)
+            err = stream.err()
+            if err is not None:
+                raise RuntimeError(f"croo event stream died: {err}")
+            tasks = getattr(stream, "_tasks", None)
+            if tasks is None:
+                continue  # fake stream in tests, or SDK internals changed
+            if any(not t.done() for t in tasks):
+                dead_checks = 0
+                continue
+            dead_checks += 1
+            if dead_checks >= self.WATCHDOG_DEAD_CHECKS:
+                raise RuntimeError(
+                    "croo event stream died: no live websocket tasks "
+                    f"for {dead_checks * self.WATCHDOG_INTERVAL:.0f}s"
+                )

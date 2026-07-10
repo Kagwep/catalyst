@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from catalyst.croo_agent import (
     CrooProvider, default_pipeline, make_no_op_provider, no_op_pipeline, parse_requirements,
 )
@@ -237,6 +239,57 @@ def test_no_op_provider_full_loop_accepts_and_delivers():
         # real SDK DeliverOrderRequest carrying the canonical no-op payload
         assert request.deliverable_type
         assert '"mode": "no-op"' in request.deliverable_schema
+
+    asyncio.run(go())
+
+
+# ---- run() watchdog: a dead stream must crash the process -------------------
+
+class DeadableStream(FakeStream):
+    """FakeStream + the health surface run()'s watchdog polls."""
+
+    def __init__(self, error=None, tasks=None):
+        super().__init__()
+        self._error = error
+        self._tasks = tasks
+
+    def err(self):
+        return self._error
+
+
+def _watchdog_provider(stream):
+    client = FakeClient()
+    client.connect_websocket = lambda: _async_return(stream)
+    provider = make_no_op_provider(client)
+    provider.WATCHDOG_INTERVAL = 0.01
+    return provider
+
+
+async def _async_return(value):
+    return value
+
+
+def test_run_raises_when_stream_records_fatal_error():
+    """Duplicate SDK-Key (1008): SDK sets err() and stops — run() must not idle."""
+    stream = DeadableStream(error=RuntimeError("duplicate SDK-Key connection"),
+                            tasks=[])
+    with pytest.raises(RuntimeError, match="duplicate SDK-Key"):
+        asyncio.run(_watchdog_provider(stream).run())
+
+
+def test_run_raises_when_all_stream_tasks_are_dead():
+    """Failed SDK reconnect leaves no live tasks and no err() — still must exit."""
+    stream = DeadableStream(error=None, tasks=[])
+    with pytest.raises(RuntimeError, match="no live websocket tasks"):
+        asyncio.run(_watchdog_provider(stream).run())
+
+
+def test_run_keeps_waiting_when_stream_health_is_opaque():
+    """A stream without _tasks (fake/newer SDK) must not be declared dead."""
+    async def go():
+        stream = DeadableStream(error=None, tasks=None)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(_watchdog_provider(stream).run(), timeout=0.2)
 
     asyncio.run(go())
 

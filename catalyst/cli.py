@@ -1369,6 +1369,11 @@ def main(argv: list[str] | None = None) -> int:
             asyncio.run(provider.run())
         except KeyboardInterrupt:
             print("\nStopped.", file=sys.stderr)
+        except RuntimeError as err:
+            # Dead event stream (duplicate key, failed reconnect). Exit non-zero
+            # so the host (Railway) restarts us with a fresh connection.
+            print(f"\n{err} — exiting for restart", file=sys.stderr)
+            return 1
         finally:
             asyncio.run(client.close())
         return 0
