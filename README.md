@@ -233,6 +233,21 @@ curve + `calibration_error`, a buy-and-hold-BTC baseline) and a **portfolio sim*
 (confidence-sized positions, fees + slippage → total return, Sharpe, max
 drawdown, win-rate, profit factor).
 
+### Learning data layer
+
+Every poll cycle also builds the dataset a future learned scoring factor will
+train on. Each computed signal is persisted as a **`score_snapshots`** row
+(sentiment/strength/score, the planner's per-layer bias breakdown, spot price at
+score time), with one pending **`score_outcomes`** row per horizon (1h / 24h /
+72h by default). When a horizon elapses, a later cycle fills in the realized
+forward return + a BTC baseline — features and labels land joined and queryable,
+no separate scheduler. Significant market moves (default |24h| ≥ 5% on the watch
+list) are logged to **`market_moves`** with the catalysts that were active in
+the window, or flagged *unexplained* — the catalysts the pipeline missed.
+Configure via the `learning` block in `sources.json`; inspect with
+`catalyst outcomes` (add `--summary` for hit-rates by catalyst/confidence) and
+`catalyst moves`.
+
 ---
 
 ## Usage — developers
@@ -316,6 +331,14 @@ catalyst monitor check                            # dry-run the event path (prev
 ```bash
 # Operator health: last cycle, source freshness, open proposals, ops issues
 catalyst status
+```
+
+```bash
+# Learning data: recorded scores joined to realized forward returns
+catalyst outcomes --status resolved --limit 20    # features next to labels
+catalyst outcomes --summary                       # hit-rates by catalyst/confidence/direction
+catalyst outcomes --resolve                       # resolve due horizons now (else next poll does)
+catalyst moves --detect                           # significant moves + catalyst attribution
 ```
 
 ```bash

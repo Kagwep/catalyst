@@ -38,6 +38,17 @@
 
   "derivs": { "assets": ["BTC", "ETH", "SOL"] },
 
+  "predictions": {
+    "polymarket": { "min_volume_24h": 50000, "max_markets": 20, "min_shift": 0.1 },
+    "kalshi": { "series": ["KXFEDDECISION", "KXCPIYOY"], "min_shift": 0.1, "min_volume_24h": 500 }
+  },
+
+  "hyperliquid": {
+    "baseline_file": "hyperliquid_universe.json",
+    "listings": true,
+    "funding_flips": { "assets": ["BTC", "ETH", "SOL"], "min_mean": 0.0001 }
+  },
+
   "market": { "fear_greed": true, "limit": 30 },
 
   "dedupe": { "enabled": true, "jaccard": 0.72 },
@@ -49,5 +60,19 @@
     "sinks": [{ "type": "stderr" }]
   },
 
-  "monitoring": { "silence_cycles": 3, "max_error_streak": 3, "llm_call_ceiling": null }
+  "monitoring": { "silence_cycles": 3, "max_error_streak": 3, "llm_call_ceiling": null },
+
+  "learning": {
+    "enabled": true,
+    "horizons_hours": [1, 24, 72],
+    "price_period": "1h",
+    "price_tolerance_hours": 3,
+    "give_up_hours": 48,
+    "moves": {
+      "assets": ["BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "BNB", "AVAX", "LINK"],
+      "window_hours": 24,
+      "threshold": 0.05,
+      "cooldown_hours": 12
+    }
+  }
 }

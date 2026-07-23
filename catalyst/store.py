@@ -107,6 +107,64 @@ CREATE TABLE IF NOT EXISTS cycle_health (
     summary     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_cycle_health ON cycle_health(started_at);
+
+CREATE TABLE IF NOT EXISTS score_snapshots (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    cycle       INTEGER,             -- cycle_health.cycle (NULL for direct calls)
+    ts          TEXT NOT NULL,       -- the cycle "now" (same ts as bias_snapshots)
+    asset       TEXT NOT NULL,
+    sentiment   REAL,
+    strength    REAL,
+    score       REAL,
+    direction   TEXT,
+    mentions    INTEGER,
+    velocity    REAL,
+    catalysts   TEXT,                -- JSON list
+    sources     TEXT,                -- JSON list
+    latest_at   TEXT,
+    action      TEXT,                -- planner outcome this cycle (buy/sell/watch/NULL)
+    confidence  REAL,
+    horizon     TEXT,
+    layers      TEXT,                -- JSON: per-layer {label, bias, effect, weight}
+    price_at_score REAL,             -- spot at record time (NULL if oracle unavailable)
+    created_at  TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_score_snap_ts_asset ON score_snapshots(ts, asset);
+CREATE INDEX IF NOT EXISTS idx_score_snap_asset ON score_snapshots(asset, ts);
+
+CREATE TABLE IF NOT EXISTS score_outcomes (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_id   INTEGER NOT NULL,  -- score_snapshots.id
+    asset         TEXT NOT NULL,     -- denormalized for the resolution query
+    scored_at     TEXT NOT NULL,     -- = snapshot ts
+    horizon_hours REAL NOT NULL,
+    due_at        TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'pending',  -- pending | resolved | no_price
+    attempts      INTEGER DEFAULT 0,
+    resolved_at   TEXT,
+    entry_px      REAL,
+    exit_px       REAL,
+    ret           REAL,              -- exit/entry - 1 (the label)
+    btc_ret       REAL               -- BTC return over the same window (baseline)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_outcome_snap_h ON score_outcomes(snapshot_id, horizon_hours);
+CREATE INDEX IF NOT EXISTS idx_outcome_due ON score_outcomes(status, due_at);
+
+CREATE TABLE IF NOT EXISTS market_moves (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset        TEXT NOT NULL,
+    detected_at  TEXT NOT NULL,
+    window_hours REAL NOT NULL,
+    start_px     REAL,
+    end_px       REAL,
+    ret          REAL NOT NULL,      -- signed move over the window
+    catalysts    TEXT,               -- JSON list of catalysts active in the window
+    evidence     TEXT,               -- JSON sample [{uri, catalyst, event, sentiment_score}]
+    signal_score REAL,               -- latest score_snapshots.score in the window
+    action       TEXT,               -- any buy/sell emitted in the window
+    explained    INTEGER DEFAULT 0   -- 1 = catalysts/actions covered it; 0 = unexplained
+);
+CREATE INDEX IF NOT EXISTS idx_moves_asset ON market_moves(asset, detected_at);
 """
 
 # Columns added after the initial release — applied to pre-existing DBs.
@@ -514,7 +572,10 @@ def fetch_market(conn: sqlite3.Connection) -> list[dict]:
 # directional view, so counting them as sentiment dilutes the news read toward
 # neutral. They already feed their OWN bias layers (fetch_derivs/market/onchain/…),
 # so we exclude them here. macro/flows are already excluded (they carry no ticker).
-NEWS_SOURCES = ("bluesky", "rss", "github")
+# predictions (Polymarket/Kalshi odds shifts) and hyperliquid (listings, funding
+# regime flips) ARE directional events, so they count as news: LLM-enriched,
+# signal inputs, and recorded on the learning path (score_snapshots/outcomes).
+NEWS_SOURCES = ("bluesky", "rss", "github", "predictions", "hyperliquid")
 
 
 def fetch_enriched(
@@ -589,6 +650,182 @@ def to_dataframe(
         sql += " LIMIT :limit"
         params["limit"] = limit
     return pd.read_sql_query(sql, conn, params=params)
+
+
+def save_score_snapshot(conn: sqlite3.Connection, row: dict) -> int:
+    """Insert one per-asset score snapshot; returns its id.
+
+    The (ts, asset) unique index makes a re-run of the same cycle a no-op, so a
+    crashed/repeated `--once` run never records twice. The id is read back by
+    key instead of lastrowid (which the Postgres proxy doesn't support).
+    """
+    with conn:
+        conn.execute(
+            "INSERT INTO score_snapshots (cycle, ts, asset, sentiment, strength, score, "
+            "direction, mentions, velocity, catalysts, sources, latest_at, action, "
+            "confidence, horizon, layers, price_at_score, created_at) "
+            "VALUES (:cycle, :ts, :asset, :sentiment, :strength, :score, :direction, "
+            ":mentions, :velocity, :catalysts, :sources, :latest_at, :action, "
+            ":confidence, :horizon, :layers, :price_at_score, :created_at) "
+            "ON CONFLICT (ts, asset) DO NOTHING",
+            row,
+        )
+    got = conn.execute(
+        "SELECT id FROM score_snapshots WHERE ts = :ts AND asset = :asset",
+        {"ts": row["ts"], "asset": row["asset"]},
+    ).fetchone()
+    return got[0]
+
+
+def save_pending_outcomes(
+    conn: sqlite3.Connection, snapshot_id: int, asset: str, scored_at: str,
+    horizons_hours: Iterable[float],
+) -> int:
+    """Pre-create one pending outcome row per horizon for a snapshot.
+
+    Resolution later is just `status='pending' AND due_at <= now` — idempotent
+    via the (snapshot_id, horizon_hours) unique index."""
+    base = datetime.fromisoformat(scored_at)
+    n = 0
+    with conn:
+        for h in horizons_hours:
+            conn.execute(
+                "INSERT INTO score_outcomes (snapshot_id, asset, scored_at, "
+                "horizon_hours, due_at) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT (snapshot_id, horizon_hours) DO NOTHING",
+                (snapshot_id, asset, scored_at, float(h),
+                 (base + timedelta(hours=float(h))).isoformat()),
+            )
+            n += 1
+    return n
+
+
+def fetch_due_outcomes(
+    conn: sqlite3.Connection, *, now_iso: str, limit: int = 500
+) -> list[dict]:
+    """Pending outcomes whose horizon has elapsed, oldest-due first."""
+    rows = conn.execute(
+        "SELECT o.id, o.snapshot_id, o.asset, o.scored_at, o.horizon_hours, o.due_at, "
+        "o.attempts, o.entry_px, s.price_at_score "
+        "FROM score_outcomes o JOIN score_snapshots s ON s.id = o.snapshot_id "
+        "WHERE o.status = 'pending' AND o.due_at <= :now "
+        "ORDER BY o.due_at LIMIT :limit",
+        {"now": now_iso, "limit": limit},
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def resolve_outcome(
+    conn: sqlite3.Connection, outcome_id: int, *, entry_px: float, exit_px: float,
+    ret: float, btc_ret: float | None, resolved_at: str,
+) -> int:
+    """Mark one outcome resolved with its realized prices/returns.
+
+    The `status='pending'` guard makes concurrent hosted double-runs harmless."""
+    with conn:
+        cur = conn.execute(
+            "UPDATE score_outcomes SET status='resolved', entry_px=?, exit_px=?, "
+            "ret=?, btc_ret=?, resolved_at=? WHERE id=? AND status='pending'",
+            (entry_px, exit_px, ret, btc_ret, resolved_at, outcome_id),
+        )
+    return cur.rowcount
+
+
+def bump_outcome_attempt(
+    conn: sqlite3.Connection, outcome_id: int, *, give_up: bool = False
+) -> None:
+    """Count a failed resolution attempt; `give_up` retires the row as no_price."""
+    with conn:
+        if give_up:
+            conn.execute(
+                "UPDATE score_outcomes SET attempts = attempts + 1, status='no_price' "
+                "WHERE id=? AND status='pending'", (outcome_id,),
+            )
+        else:
+            conn.execute(
+                "UPDATE score_outcomes SET attempts = attempts + 1 "
+                "WHERE id=? AND status='pending'", (outcome_id,),
+            )
+
+
+def fetch_outcomes(
+    conn: sqlite3.Connection, *, asset: str | None = None,
+    horizon_hours: float | None = None, status: str | None = None, limit: int = 100,
+) -> list[dict]:
+    """Snapshot⋈outcome rows (features next to labels), newest-scored first."""
+    sql = (
+        "SELECT o.id, o.asset, o.scored_at, o.horizon_hours, o.due_at, o.status, "
+        "o.attempts, o.resolved_at, o.entry_px, o.exit_px, o.ret, o.btc_ret, "
+        "s.cycle, s.sentiment, s.strength, s.score, s.direction, s.mentions, "
+        "s.velocity, s.catalysts, s.action, s.confidence, s.horizon, s.layers, "
+        "s.price_at_score "
+        "FROM score_outcomes o JOIN score_snapshots s ON s.id = o.snapshot_id"
+    )
+    clauses: list[str] = []
+    params: dict[str, object] = {"limit": limit}
+    if asset:
+        clauses.append("o.asset = :asset")
+        params["asset"] = asset
+    if horizon_hours is not None:
+        clauses.append("o.horizon_hours = :h")
+        params["h"] = float(horizon_hours)
+    if status:
+        clauses.append("o.status = :status")
+        params["status"] = status
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY o.scored_at DESC, o.horizon_hours LIMIT :limit"
+    return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+
+def fetch_latest_score(
+    conn: sqlite3.Connection, asset: str, *, since_iso: str
+) -> float | None:
+    """The most recent recorded signal score for `asset` since `since_iso`."""
+    row = conn.execute(
+        "SELECT score FROM score_snapshots WHERE asset = :a AND ts >= :s "
+        "ORDER BY ts DESC LIMIT 1",
+        {"a": asset, "s": since_iso},
+    ).fetchone()
+    return row[0] if row else None
+
+
+def save_market_move(conn: sqlite3.Connection, move: dict) -> int:
+    """Record one significant market move (with its catalyst attribution)."""
+    with conn:
+        conn.execute(
+            "INSERT INTO market_moves (asset, detected_at, window_hours, start_px, "
+            "end_px, ret, catalysts, evidence, signal_score, action, explained) "
+            "VALUES (:asset, :detected_at, :window_hours, :start_px, :end_px, :ret, "
+            ":catalysts, :evidence, :signal_score, :action, :explained)",
+            move,
+        )
+    return 1
+
+
+def fetch_recent_moves(
+    conn: sqlite3.Connection, *, asset: str | None = None,
+    within_hours: float | None = None, limit: int = 50,
+    now: datetime | None = None,
+) -> list[dict]:
+    """Recorded market moves, newest first — also feeds the detection cooldown."""
+    sql = (
+        "SELECT id, asset, detected_at, window_hours, start_px, end_px, ret, "
+        "catalysts, evidence, signal_score, action, explained FROM market_moves"
+    )
+    clauses: list[str] = []
+    params: dict[str, object] = {"limit": limit}
+    if asset:
+        clauses.append("asset = :asset")
+        params["asset"] = asset
+    if within_hours is not None:
+        now = now or datetime.now(timezone.utc)
+        clauses.append("detected_at >= :cutoff")
+        params["cutoff"] = (now - timedelta(hours=within_hours)).isoformat()
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY detected_at DESC LIMIT :limit"
+    return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
 
 def query_posts(

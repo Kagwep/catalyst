@@ -16,6 +16,8 @@
   catalyst signals [--window 24] [--halflife 6] [--min-strength 0.05] [--asset BTC]
   catalyst compare [--a weights.json] --b other.json     # A/B weight tuning
   catalyst plan [--buy-threshold 0.2] [--max-age 180] [--cooldown 120] [--save]
+  catalyst outcomes [--status resolved] [--summary] [--resolve]   # scores vs realized returns
+  catalyst moves [--detect]                # significant market moves + catalyst attribution
   catalyst export --out posts.parquet [--format parquet|csv] [--source rss] [--limit N]
 
 Add --save (with optional --db PATH, default catalyst.db) to any fetch command to
@@ -226,7 +228,7 @@ def _persist(posts: list[Post], db_path: str) -> None:
         conn.close()
 
 
-def _poll_cycle(conn, args, primary, llm_score):
+def _poll_cycle(conn, args, primary, llm_score, cycle: int | None = None):
     """One poll cycle: fetch → save → (enrich) → (signals → plan).
 
     Returns a `CycleHealth` with structured counts, the one-line `summary`, and
@@ -280,7 +282,10 @@ def _poll_cycle(conn, args, primary, llm_score):
         derivs_bias = _derivs_bias(conn, args)
         # Snapshot what each layer saw this cycle — builds point-in-time history
         # for backtesting (essential for staking, an audit for flows/macro).
-        save_bias_snapshots(conn, datetime.now(timezone.utc).isoformat(),
+        # `ts` is shared with the score snapshots below so features join cleanly.
+        now = datetime.now(timezone.utc)
+        ts = now.isoformat()
+        save_bias_snapshots(conn, ts,
                             regime=regime, flow_bias=flow_bias, supply_bias=supply_bias,
                             market_bias=market_bias, derivs_bias=derivs_bias)
         # Trend layer reads the point-in-time bias history we just extended above,
@@ -319,6 +324,34 @@ def _poll_cycle(conn, args, primary, llm_score):
                 f"{a} {b.label}" for a, b in supply_bias.items() if b.label != "neutral"
             )
         parts.append(tag)
+
+        # Learning layer: persist this cycle's scores + resolve any outcomes whose
+        # horizon elapsed + log significant market moves. Fail-soft — a price-API
+        # outage leaves outcome rows pending for the next cycle, never breaks polling.
+        try:
+            from . import learning
+
+            lcfg = learning.learning_cfg(args.config)
+            if lcfg.get("enabled", True):
+                oracle = learning.build_oracle(conn, lcfg, [s.asset for s in sigs], now)
+                n_rec = learning.record_cycle(
+                    conn, ts=ts, signals=sigs, actions=actions, cycle=cycle,
+                    oracle=oracle, horizons=lcfg["horizons_hours"],
+                )
+                if oracle is not None:
+                    res = learning.resolve_due(conn, now=now, oracle=oracle, cfg=lcfg)
+                    n_mov = learning.detect_moves(
+                        conn, now=now, oracle=oracle,
+                        enriched_rows=fetch_enriched(conn), cfg=lcfg,
+                    )
+                    ltag = f"{n_rec} scored, {res['resolved']} resolved"
+                    if n_mov:
+                        ltag += f", {n_mov} move(s)"
+                    parts.append(ltag)
+                else:
+                    parts.append(f"{n_rec} scored (prices unavailable)")
+        except Exception as err:  # noqa: BLE001 — learning must never break polling
+            print(f"    learning layer skipped: {err}", file=sys.stderr)
 
     health.summary = ", ".join(parts)
     return health
@@ -458,7 +491,7 @@ def _cmd_poll(args: argparse.Namespace) -> None:
             started = datetime.now(timezone.utc).isoformat()
             t0 = perf_counter()
             try:
-                health = _poll_cycle(conn, args, primary, llm_score)
+                health = _poll_cycle(conn, args, primary, llm_score, cycle=cycle)
                 health.cycle = cycle
                 health.started_at = started
                 health.duration_ms = round((perf_counter() - t0) * 1000.0, 1)
@@ -816,6 +849,29 @@ def build_parser() -> argparse.ArgumentParser:
     st.add_argument("--interval", default="5m", help="expected poll interval (slow-cycle detection)")
     st.add_argument("--window", type=float, default=24.0, help="hours for proposal/alert counts")
 
+    oc = sub.add_parser(
+        "outcomes", parents=[common],
+        help="learning rows: recorded scores joined to realized forward returns",
+    )
+    oc.add_argument("--asset")
+    oc.add_argument("--horizon", type=float, help="filter to one horizon (hours)")
+    oc.add_argument("--status", choices=["pending", "resolved", "no_price"])
+    oc.add_argument("--limit", type=int, default=100)
+    oc.add_argument("--resolve", action="store_true",
+                    help="resolve due outcomes now instead of waiting for the next poll cycle")
+    oc.add_argument("--summary", action="store_true",
+                    help="bucket resolved outcomes by catalyst/direction/confidence")
+    oc.add_argument("--config", default="sources.json", help="config with the `learning` block")
+
+    mv = sub.add_parser(
+        "moves", parents=[common],
+        help="significant market moves with catalyst attribution (explained vs not)",
+    )
+    mv.add_argument("--asset")
+    mv.add_argument("--limit", type=int, default=50)
+    mv.add_argument("--detect", action="store_true", help="run one detection pass now")
+    mv.add_argument("--config", default="sources.json", help="config with the `learning` block")
+
     q = sub.add_parser("query", parents=[common], help="read stored posts, newest-first")
     q.add_argument("--limit", type=int, default=20)
     q.add_argument("--source")
@@ -952,6 +1008,106 @@ def main(argv: list[str] | None = None) -> int:
             f"{rep['open_proposals']} open proposals, {rep['alerts_24h']} alerts/24h",
             file=sys.stderr,
         )
+        return 0
+
+    if args.cmd == "outcomes":
+        from . import learning
+        from .store import fetch_outcomes
+
+        conn = open_store(args.db)
+        try:
+            if args.resolve:
+                now = datetime.now(timezone.utc)
+                lcfg = learning.learning_cfg(args.config)
+                oracle = learning.build_oracle(conn, lcfg, [], now)
+                if oracle is None:
+                    print("resolve skipped: price source unavailable", file=sys.stderr)
+                else:
+                    res = learning.resolve_due(conn, now=now, oracle=oracle, cfg=lcfg)
+                    print(
+                        f"resolved {res['resolved']}, gave up {res['gave_up']}, "
+                        f"still pending {res['pending']}", file=sys.stderr,
+                    )
+            rows = fetch_outcomes(
+                conn, asset=args.asset, horizon_hours=args.horizon,
+                status=args.status, limit=args.limit,
+            )
+        finally:
+            conn.close()
+
+        def _hit(r):
+            return (r["score"] or 0) != 0 and (r["ret"] or 0) != 0 and \
+                (r["score"] > 0) == (r["ret"] > 0)
+
+        resolved = [r for r in rows if r["status"] == "resolved"]
+        if args.summary:
+            buckets: dict[str, dict] = {"by_catalyst": {}, "by_direction": {}, "by_confidence": {}}
+            for r in resolved:
+                keys = {
+                    "by_direction": [r["direction"] or "?"],
+                    "by_confidence": [f"{round((r['confidence'] or 0) * 10) / 10:.1f}"],
+                    "by_catalyst": json.loads(r["catalysts"] or "[]") or ["(none)"],
+                }
+                for bucket, ks in keys.items():
+                    for k in ks:
+                        b = buckets[bucket].setdefault(k, {"n": 0, "hits": 0, "rets": []})
+                        b["n"] += 1
+                        b["hits"] += 1 if _hit(r) else 0
+                        b["rets"].append(r["ret"] or 0.0)
+            out = {
+                bucket: {
+                    k: {"n": b["n"], "hit_rate": round(b["hits"] / b["n"], 3),
+                        "mean_ret": round(sum(b["rets"]) / b["n"], 5)}
+                    for k, b in sorted(vals.items(), key=lambda kv: -kv[1]["n"])
+                }
+                for bucket, vals in buckets.items()
+            }
+            json.dump(out, sys.stdout, indent=2)
+        else:
+            for r in rows:
+                for col in ("catalysts", "layers"):
+                    try:
+                        r[col] = json.loads(r[col]) if r[col] else None
+                    except (TypeError, json.JSONDecodeError):
+                        pass
+            json.dump(rows, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        pending = sum(1 for r in rows if r["status"] == "pending")
+        day = [r for r in resolved if r["horizon_hours"] == 24.0]
+        hr = f"; 24h hit-rate {sum(1 for r in day if _hit(r)) / len(day):.0%}" if day else ""
+        print(f"\n{len(rows)} outcomes ({len(resolved)} resolved, {pending} pending){hr}",
+              file=sys.stderr)
+        return 0
+
+    if args.cmd == "moves":
+        from . import learning
+        from .store import fetch_recent_moves
+
+        conn = open_store(args.db)
+        try:
+            if args.detect:
+                now = datetime.now(timezone.utc)
+                lcfg = learning.learning_cfg(args.config)
+                oracle = learning.build_oracle(conn, lcfg, [], now)
+                if oracle is None:
+                    print("detect skipped: price source unavailable", file=sys.stderr)
+                else:
+                    n = learning.detect_moves(conn, now=now, oracle=oracle,
+                                              enriched_rows=fetch_enriched(conn), cfg=lcfg)
+                    print(f"detected {n} move(s)", file=sys.stderr)
+            rows = fetch_recent_moves(conn, asset=args.asset, limit=args.limit)
+        finally:
+            conn.close()
+        for r in rows:
+            for col in ("catalysts", "evidence"):
+                try:
+                    r[col] = json.loads(r[col]) if r[col] else None
+                except (TypeError, json.JSONDecodeError):
+                    pass
+        json.dump(rows, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        unexplained = sum(1 for r in rows if not r["explained"])
+        print(f"\n{len(rows)} move(s), {unexplained} unexplained", file=sys.stderr)
         return 0
 
     if args.cmd == "plan":

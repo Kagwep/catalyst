@@ -154,6 +154,14 @@ def run_config(config_path: str) -> list[Post]:
     if cfg.get("derivs"):
         results.extend(_derivs_sources(cfg["derivs"]))
 
+    # Prediction markets: Polymarket/Kalshi odds shifts as catalyst events.
+    if cfg.get("predictions"):
+        results.extend(_predictions_sources(cfg["predictions"]))
+
+    # Hyperliquid platform events: new perp listings + funding regime flips.
+    if cfg.get("hyperliquid"):
+        results.extend(_hyperliquid_sources(cfg["hyperliquid"]))
+
     # Market layer: Fear & Greed index (price technicals are computed at plan time).
     if cfg.get("market"):
         results.extend(_market_sources(cfg["market"]))
@@ -194,6 +202,49 @@ def _derivs_sources(d) -> list[Post]:
         open_interest=opts.get("open_interest", True),
         oi_limit=opts.get("oi_limit", 30),
     ))
+
+
+def _predictions_sources(p) -> list[Post]:
+    from . import predictions as pm
+
+    opts = p if isinstance(p, dict) else {}
+    out: list[Post] = []
+    poly = opts.get("polymarket", True)
+    if poly:
+        po = poly if isinstance(poly, dict) else {}
+        out.extend(_safe("polymarket odds", lambda: pm.fetch_polymarket(
+            terms=po.get("terms"),
+            min_volume_24h=po.get("min_volume_24h", pm.DEFAULT_POLY_MIN_VOLUME),
+            max_markets=po.get("max_markets", 20),
+            min_shift=po.get("min_shift", pm.DEFAULT_MIN_SHIFT),
+        )))
+    kal = opts.get("kalshi", True)
+    if kal:
+        ko = kal if isinstance(kal, dict) else {}
+        out.extend(_safe("kalshi odds", lambda: pm.fetch_kalshi(
+            series=ko.get("series"),
+            min_shift=ko.get("min_shift", pm.DEFAULT_MIN_SHIFT),
+            min_volume_24h=ko.get("min_volume_24h", pm.DEFAULT_KALSHI_MIN_VOLUME),
+        )))
+    return out
+
+
+def _hyperliquid_sources(h) -> list[Post]:
+    from . import hl_events as hl
+
+    opts = h if isinstance(h, dict) else {}
+    out: list[Post] = []
+    if opts.get("listings", True):
+        out.extend(_safe("hyperliquid listings", lambda: hl.fetch_listings(
+            baseline_file=opts.get("baseline_file", hl.DEFAULT_BASELINE_FILE),
+        )))
+    flips = opts.get("funding_flips", True)
+    if flips:
+        fo = flips if isinstance(flips, dict) else {}
+        out.extend(_safe("hyperliquid funding flips", lambda: hl.fetch_funding_flips(
+            fo.get("assets"), min_mean=fo.get("min_mean", hl.DEFAULT_MIN_MEAN),
+        )))
+    return out
 
 
 def _onchain_actions_sources(oa) -> list[Post]:
