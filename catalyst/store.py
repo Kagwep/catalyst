@@ -575,7 +575,9 @@ def fetch_market(conn: sqlite3.Connection) -> list[dict]:
 # predictions (Polymarket/Kalshi odds shifts) and hyperliquid (listings, funding
 # regime flips) ARE directional events, so they count as news: LLM-enriched,
 # signal inputs, and recorded on the learning path (score_snapshots/outcomes).
-NEWS_SOURCES = ("bluesky", "rss", "github", "predictions", "hyperliquid")
+# exchange (Binance/Upbit listing announcements) and telegram (announcement +
+# fast-news channels) are likewise directional text events, so they count too.
+NEWS_SOURCES = ("bluesky", "rss", "github", "predictions", "hyperliquid", "exchange", "telegram")
 
 
 def fetch_enriched(

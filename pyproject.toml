@@ -26,6 +26,11 @@ llm = [
 pg = [
     "psycopg[binary]>=3.1",
 ]
+# Telegram source — MTProto user client for reading public announcement /
+# fast-news channels. Only needed when the `telegram` config block is used.
+telegram = [
+    "telethon>=1.36",
+]
 dev = [
     "pytest>=8.0",
     "respx>=0.21",

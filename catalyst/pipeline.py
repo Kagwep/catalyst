@@ -162,6 +162,14 @@ def run_config(config_path: str) -> list[Post]:
     if cfg.get("hyperliquid"):
         results.extend(_hyperliquid_sources(cfg["hyperliquid"]))
 
+    # Centralized-exchange announcements: Binance/Upbit listing catalysts at source.
+    if cfg.get("exchanges"):
+        results.extend(_exchange_sources(cfg["exchanges"]))
+
+    # Telegram: public announcement + fast-news channels via MTProto (env-gated).
+    if cfg.get("telegram"):
+        results.extend(_telegram_sources(cfg["telegram"]))
+
     # Market layer: Fear & Greed index (price technicals are computed at plan time).
     if cfg.get("market"):
         results.extend(_market_sources(cfg["market"]))
@@ -181,6 +189,29 @@ def _collapse_cross_source(posts: list[Post], dcfg) -> list[Post]:
     if n:
         print(f"cross-source de-dupe: collapsed {n} near-duplicate(s)", file=sys.stderr)
     return deduped
+
+
+def _exchange_sources(e) -> list[Post]:
+    from . import exchanges as ex
+
+    opts = e if isinstance(e, dict) else {}
+    # fetch_exchanges already isolates each venue; wrap once so a total failure
+    # (e.g. import error) still can't sink the batch.
+    return _safe("exchange announcements", lambda: ex.fetch_exchanges(opts))
+
+
+def _telegram_sources(t) -> list[Post]:
+    from . import telegram as tg
+
+    opts = t if isinstance(t, dict) else {}
+    channels = opts.get("channels") or []
+    if not channels:
+        return []
+    return _safe("telegram", lambda: tg.fetch_channels(
+        channels,
+        max=opts.get("max", tg.DEFAULT_MAX),
+        since_hours=opts.get("since_hours", tg.DEFAULT_SINCE_HOURS),
+    ))
 
 
 def _market_sources(m) -> list[Post]:

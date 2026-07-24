@@ -49,6 +49,17 @@
     "funding_flips": { "assets": ["BTC", "ETH", "SOL"], "min_mean": 0.0001 }
   },
 
+  "exchanges": {
+    "binance": { "catalogs": [48], "since_hours": 24, "max": 20 },
+    "upbit": { "category": "trade", "since_hours": 24, "max": 20 }
+  },
+
+  "telegram": {
+    "channels": ["BWEnews", "TreeNews_official", "whale_alert_io"],
+    "since_hours": 6,
+    "max": 30
+  },
+
   "market": { "fear_greed": true, "limit": 30 },
 
   "dedupe": { "enabled": true, "jaccard": 0.72 },
