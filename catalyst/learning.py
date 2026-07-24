@@ -86,14 +86,46 @@ def build_oracle(conn, cfg: dict, assets, now: datetime) -> PriceOracle | None:
         return None
 
 
+def build_catalyst_text(enriched_rows, asset: str, *, limit: int = 6,
+                        max_len: int = 180) -> str | None:
+    """Compact 'what happened' digest for `asset` from its catalyst-bearing rows.
+
+    This is the durable text corpus behind a snapshot: the actual events /
+    headlines that produced the signal, not just the category label. Later work
+    (e.g. embeddings) needs the content — "SEC dropped its appeal against Ripple",
+    not the bare tag "regulation". Prefers the LLM `event` extraction, falls back
+    to the raw post text; newest first, bounded. None when the asset has no
+    catalyst-bearing rows this cycle."""
+    from .signals import _assets, _parse_dt
+
+    _floor = datetime.min.replace(tzinfo=timezone.utc)
+    picked: list[tuple[datetime, str]] = []
+    for r in enriched_rows or []:
+        if asset not in _assets(r):
+            continue
+        cat = r.get("catalyst")
+        text = (r.get("event") or "").strip() or (r.get("text") or "").strip()[:max_len]
+        if not text or (not cat and not r.get("event")):
+            continue
+        src = r.get("source")
+        line = (f"[{cat}] " if cat else "") + text + (f" ({src})" if src else "")
+        picked.append((_parse_dt(r.get("indexed_at")) or _floor, line))
+    if not picked:
+        return None
+    picked.sort(key=lambda x: x[0], reverse=True)
+    return " | ".join(line for _, line in picked[:limit])
+
+
 def record_cycle(
     conn, *, ts: str, signals, actions, horizons, cycle: int | None = None,
-    oracle: PriceOracle | None = None,
+    oracle: PriceOracle | None = None, enriched_rows=None,
 ) -> int:
     """Persist this cycle's signals as snapshots + pending outcomes. Returns count.
 
     Records ALL signals, not just the ones that became actions — sub-threshold
-    scores are exactly the negatives a learner needs. Idempotent per (ts, asset)."""
+    scores are exactly the negatives a learner needs. Idempotent per (ts, asset).
+    `enriched_rows` (this cycle's enriched posts) supplies the catalyst_text
+    digest; omit it and the column is simply left NULL."""
     created_at = datetime.now(timezone.utc).isoformat()
     by_asset = {a.asset: a for a in (actions or [])}
     n = 0
@@ -117,6 +149,7 @@ def record_cycle(
             "horizon": act.horizon if act else None,
             "layers": json.dumps(act.layers) if act else None,
             "price_at_score": oracle.price_at(s.asset, ts) if oracle else None,
+            "catalyst_text": build_catalyst_text(enriched_rows, s.asset),
             "created_at": created_at,
         }
         snapshot_id = save_score_snapshot(conn, row)

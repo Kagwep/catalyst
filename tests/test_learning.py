@@ -69,6 +69,42 @@ def test_record_cycle_writes_snapshots_and_pending_outcomes(tmp_path):
         conn.close()
 
 
+def _enr(asset, *, catalyst=None, event=None, text="", source="bluesky", when=START):
+    return {"assets": json.dumps([asset]), "catalyst": catalyst, "event": event,
+            "text": text, "source": source, "indexed_at": when.isoformat()}
+
+
+def test_build_catalyst_text_prefers_event_and_orders_newest_first():
+    rows = [
+        _enr("BTC", catalyst="etf", event="SEC approves spot BTC ETF",
+             when=START + timedelta(hours=1)),
+        _enr("BTC", catalyst="regulation", text="raw headline body here", when=START),
+        _enr("ETH", catalyst="hack", event="bridge drained"),  # different asset
+    ]
+    out = learning.build_catalyst_text(rows, "BTC")
+    assert out == ("[etf] SEC approves spot BTC ETF (bluesky) | "
+                   "[regulation] raw headline body here (bluesky)")
+
+
+def test_build_catalyst_text_none_without_catalyst_rows():
+    # A row with neither a catalyst tag nor an event contributes nothing.
+    rows = [_enr("BTC", text="just chatter")]
+    assert learning.build_catalyst_text(rows, "BTC") is None
+    assert learning.build_catalyst_text(None, "BTC") is None
+
+
+def test_record_cycle_persists_catalyst_text(tmp_path):
+    conn = open_store(str(tmp_path / "t.db"))
+    try:
+        rows = [_enr("BTC", catalyst="etf", event="SEC approves spot BTC ETF")]
+        learning.record_cycle(conn, ts=START.isoformat(), signals=[_sig("BTC")],
+                              actions=[], horizons=[1.0], enriched_rows=rows)
+        got = conn.execute("SELECT catalyst_text FROM score_snapshots").fetchone()[0]
+        assert "SEC approves spot BTC ETF" in got
+    finally:
+        conn.close()
+
+
 def test_resolve_due_fills_labels_and_is_idempotent(tmp_path):
     conn = open_store(str(tmp_path / "t.db"))
     try:

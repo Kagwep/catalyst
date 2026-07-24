@@ -127,6 +127,9 @@ CREATE TABLE IF NOT EXISTS score_snapshots (
     horizon     TEXT,
     layers      TEXT,                -- JSON: per-layer {label, bias, effect, weight}
     price_at_score REAL,             -- spot at record time (NULL if oracle unavailable)
+    catalyst_text  TEXT,             -- the "what happened" digest behind this signal
+                                     -- (events/headlines) — durable corpus for later
+                                     -- embeddings; NULL when no catalyst-bearing rows
     created_at  TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_score_snap_ts_asset ON score_snapshots(ts, asset);
@@ -220,12 +223,20 @@ def open_store(path: str = "catalyst.db"):
     return conn
 
 
+# Columns added to score_snapshots after its initial release (additive migration).
+_SCORE_SNAPSHOT_COLUMNS = {"catalyst_text": "TEXT"}
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Add any columns missing from a pre-existing posts table (additive only)."""
+    """Add any columns missing from pre-existing tables (additive only)."""
     existing = {row["name"] for row in conn.execute("PRAGMA table_info(posts)")}
     for col, decl in _ENRICH_COLUMNS.items():
         if col not in existing:
             conn.execute(f"ALTER TABLE posts ADD COLUMN {col} {decl}")
+    snap_cols = {row["name"] for row in conn.execute("PRAGMA table_info(score_snapshots)")}
+    for col, decl in _SCORE_SNAPSHOT_COLUMNS.items():
+        if col not in snap_cols:
+            conn.execute(f"ALTER TABLE score_snapshots ADD COLUMN {col} {decl}")
     conn.commit()
 
 
@@ -661,14 +672,15 @@ def save_score_snapshot(conn: sqlite3.Connection, row: dict) -> int:
     crashed/repeated `--once` run never records twice. The id is read back by
     key instead of lastrowid (which the Postgres proxy doesn't support).
     """
+    row.setdefault("catalyst_text", None)  # tolerate callers predating the column
     with conn:
         conn.execute(
             "INSERT INTO score_snapshots (cycle, ts, asset, sentiment, strength, score, "
             "direction, mentions, velocity, catalysts, sources, latest_at, action, "
-            "confidence, horizon, layers, price_at_score, created_at) "
+            "confidence, horizon, layers, price_at_score, catalyst_text, created_at) "
             "VALUES (:cycle, :ts, :asset, :sentiment, :strength, :score, :direction, "
             ":mentions, :velocity, :catalysts, :sources, :latest_at, :action, "
-            ":confidence, :horizon, :layers, :price_at_score, :created_at) "
+            ":confidence, :horizon, :layers, :price_at_score, :catalyst_text, :created_at) "
             "ON CONFLICT (ts, asset) DO NOTHING",
             row,
         )

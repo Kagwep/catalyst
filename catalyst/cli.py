@@ -333,16 +333,16 @@ def _poll_cycle(conn, args, primary, llm_score, cycle: int | None = None):
 
             lcfg = learning.learning_cfg(args.config)
             if lcfg.get("enabled", True):
+                enr = fetch_enriched(conn)  # this cycle's enriched posts; reused below
                 oracle = learning.build_oracle(conn, lcfg, [s.asset for s in sigs], now)
                 n_rec = learning.record_cycle(
                     conn, ts=ts, signals=sigs, actions=actions, cycle=cycle,
-                    oracle=oracle, horizons=lcfg["horizons_hours"],
+                    oracle=oracle, horizons=lcfg["horizons_hours"], enriched_rows=enr,
                 )
                 if oracle is not None:
                     res = learning.resolve_due(conn, now=now, oracle=oracle, cfg=lcfg)
                     n_mov = learning.detect_moves(
-                        conn, now=now, oracle=oracle,
-                        enriched_rows=fetch_enriched(conn), cfg=lcfg,
+                        conn, now=now, oracle=oracle, enriched_rows=enr, cfg=lcfg,
                     )
                     ltag = f"{n_rec} scored, {res['resolved']} resolved"
                     if n_mov:
