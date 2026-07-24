@@ -94,6 +94,7 @@ def fetch_channel(client, channel: str, *, max: int = DEFAULT_MAX,
 
 def fetch_channels(channels: list[str], *, max: int = DEFAULT_MAX,
                    since_hours: float | None = DEFAULT_SINCE_HOURS,
+                   connect_timeout: float = 15.0,
                    now: datetime | None = None) -> list[Post]:
     """Read the configured channels. No-op (with a note) when creds are unset."""
     creds = _credentials()
@@ -113,12 +114,31 @@ def fetch_channels(channels: list[str], *, max: int = DEFAULT_MAX,
     api_id, api_hash, session = creds
     now = now or datetime.now(timezone.utc)
     out: list[Post] = []
-    with TelegramClient(StringSession(session), api_id, api_hash) as client:
+
+    # Bounded connect + retries so a slow/unreachable Telegram can't stall the
+    # poll cycle. Crucially we use connect()/is_user_authorized() rather than the
+    # `with`-context .start(): .start() would fall back to an INTERACTIVE login
+    # (prompting for a phone number on stdin) when the session is invalid, which
+    # hangs a headless poller forever. Here a bad session just skips the source.
+    client = TelegramClient(StringSession(session), api_id, api_hash,
+                            timeout=connect_timeout, connection_retries=1, retries=1)
+    try:
+        client.connect()
+    except Exception as err:  # noqa: BLE001 — unreachable Telegram shouldn't sink the batch
+        print(f"telegram: connect failed ({err}) — skipping", file=sys.stderr)
+        return []
+    try:
+        if not client.is_user_authorized():
+            print("telegram: session not authorized — regenerate TELEGRAM_SESSION "
+                  "(python -m catalyst.telegram login)", file=sys.stderr)
+            return []
         for ch in channels:
             try:
                 out.extend(fetch_channel(client, ch, max=max, since_hours=since_hours, now=now))
             except Exception as err:  # noqa: BLE001 — one bad channel shouldn't sink the rest
                 print(f"telegram channel {ch} skipped: {err}", file=sys.stderr)
+    finally:
+        client.disconnect()
     return out
 
 
